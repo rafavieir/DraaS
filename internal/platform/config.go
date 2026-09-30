@@ -107,10 +107,13 @@ func Open(ctx context.Context, c Config) (*App, error) {
 		nc.Close()
 		return nil, err
 	}
-	if _, err = js.AddStream(&nats.StreamConfig{Name: "DRAAS_JOBS", Subjects: []string{"draas.jobs.*.v1"}, Storage: nats.FileStorage, Retention: nats.WorkQueuePolicy, MaxAge: 30 * 24 * time.Hour, MaxBytes: 256 << 20, Discard: nats.DiscardNew, Duplicates: 10 * time.Minute}); err != nil {
-		db.Pool.Close()
-		nc.Close()
-		return nil, err
+	stream := &nats.StreamConfig{Name: "DRAAS_JOBS", Subjects: []string{"draas.jobs.*.v1", "draas.jobs.*.v2"}, Storage: nats.FileStorage, Retention: nats.WorkQueuePolicy, MaxAge: 30 * 24 * time.Hour, MaxBytes: 256 << 20, Discard: nats.DiscardNew, Duplicates: 10 * time.Minute}
+	if _, err = js.AddStream(stream); err != nil {
+		if _, err = js.UpdateStream(stream); err != nil {
+			db.Pool.Close()
+			nc.Close()
+			return nil, err
+		}
 	}
 	signer := ed25519.NewKeyFromSeed(c.Seed)
 	tp := trace.NewTracerProvider(trace.WithBatcher(spanLogExporter{}, trace.WithMaxQueueSize(512), trace.WithExportTimeout(5*time.Second)))

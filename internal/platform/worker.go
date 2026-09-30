@@ -48,7 +48,7 @@ func (a *App) PublishOutbox(ctx context.Context) error {
 		if err = json.Unmarshal(e.b, &event); err != nil {
 			return err
 		}
-		if _, err = a.JS.Publish("draas.jobs."+event.Kind+".v1", e.b, nats.MsgId(e.id), nats.Context(ctx)); err != nil {
+		if _, err = a.JS.Publish(jobSubject(event.Kind), e.b, nats.MsgId(e.id), nats.Context(ctx)); err != nil {
 			return err
 		}
 		if _, err = a.DB.Pool.Exec(ctx, "UPDATE outbox SET published_at=now() WHERE id=$1", e.id); err != nil {
@@ -72,7 +72,7 @@ func (a *App) OutboxLoop(ctx context.Context) {
 	}
 }
 func (a *App) RunWorker(ctx context.Context) error {
-	sub, err := a.JS.PullSubscribe("draas.jobs.*.v1", "draas-workers", nats.BindStream("DRAAS_JOBS"), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(45*time.Second), nats.MaxDeliver(10), nats.MaxAckPending(16))
+	sub, err := a.JS.PullSubscribe("draas.jobs.*.*", "draas-workers-v2", nats.BindStream("DRAAS_JOBS"), nats.ManualAck(), nats.AckExplicit(), nats.AckWait(45*time.Second), nats.MaxDeliver(10), nats.MaxAckPending(16))
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (a *App) RunWorker(ctx context.Context) error {
 }
 func (a *App) process(ctx context.Context, msg *nats.Msg) error {
 	var ev contracts.Event
-	if err := json.Unmarshal(msg.Data, &ev); err != nil || ev.Version != 1 || ev.TenantID == "" || ev.ResourceID == "" {
+	if err := json.Unmarshal(msg.Data, &ev); err != nil || !workerSupports(ev, msg.Subject) {
 		return msg.Term()
 	}
 	conn, err := a.DB.Pool.Acquire(ctx)

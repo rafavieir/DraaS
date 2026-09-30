@@ -430,6 +430,14 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 			return nil, errors.New("LIBVIRT_LAB_ROOT is not configured for this worker; real recovery must run on the lab hypervisor worker")
 		}
 		runID := fmt.Sprintf("p3a-%s-attempt-%d", j.ID, j.Attempts)
+		provisionOp, err := a.DB.EnsureRecoveryOperation(ctx, j.Tenant, j.ID, catalog.RecoveryStageResourceProvision, "PROVISION_VM", req.ProviderType, "VM", "recovery", "VM_DEFINED")
+		if err != nil {
+			return nil, err
+		}
+		if err = a.DB.MarkRecoveryOperationStarted(ctx, j.Tenant, provisionOp.OperationID); err != nil {
+			return nil, err
+		}
+		_ = a.DB.AppendRecoveryTimeline(ctx, j.Tenant, j.ID, "OPERATION_INTENT_PERSISTED", catalog.RecoveryStageResourceProvision, provisionOp.OperationID, map[string]any{"operation_type": "PROVISION_VM", "status": catalog.OperationUnknown})
 		_ = a.DB.UpdateRecoveryJob(ctx, j.Tenant, j.ID, "RUNNING", "PREPARING", "", "", nil, nil)
 		signed, err := recoverylab.Run(ctx, recoverylab.Options{
 			Tenant: j.Tenant, RunID: runID, Root: os.Getenv("LIBVIRT_LAB_ROOT"),
@@ -443,6 +451,7 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 		})
 		if err != nil {
 			_ = a.DB.UpdateRecoveryJob(ctx, j.Tenant, j.ID, "FAILED", "FAILED", "", err.Error(), nil, nil)
+			_ = a.DB.FailRecoveryOperation(ctx, j.Tenant, provisionOp.OperationID, catalog.OperationUnknown, err.Error())
 			return nil, err
 		}
 		b, err := json.Marshal(signed)
@@ -461,8 +470,24 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 		if err = a.DB.UpdateRecoveryJob(ctx, j.Tenant, j.ID, status, "PASS", key, "", signed.Report, resources); err != nil {
 			return nil, err
 		}
+		if recovered, ok := signed.Report["recovered_vm"].(libvirtlab.VM); ok {
+			_, _ = a.DB.UpsertProviderResource(ctx, j.Tenant, j.ID, "", req.ProviderType, "VM", recovered.ID, provisionOp.OperationID, "READY", lifecycle(req.KeepResources), recovered)
+			_ = a.DB.ConfirmRecoveryOperation(ctx, j.Tenant, provisionOp.OperationID, recovered.ID, "")
+		} else if raw, ok := signed.Report["recovered_vm"].(map[string]any); ok {
+			if id, _ := raw["id"].(string); id != "" {
+				_, _ = a.DB.UpsertProviderResource(ctx, j.Tenant, j.ID, "", req.ProviderType, "VM", id, provisionOp.OperationID, "READY", lifecycle(req.KeepResources), raw)
+				_ = a.DB.ConfirmRecoveryOperation(ctx, j.Tenant, provisionOp.OperationID, id, "")
+			}
+		}
 		return map[string]any{"recovery_job_status": status, "billing_mode": "TEST", "billable": false, "signed_report_key": key, "report": signed.Report}, nil
 	default:
 		return nil, fmt.Errorf("unsupported job kind %q", j.Kind)
 	}
+}
+
+func lifecycle(keepResources bool) string {
+	if keepResources {
+		return "RECOVERY_PERSISTENT"
+	}
+	return "TEST_EPHEMERAL"
 }

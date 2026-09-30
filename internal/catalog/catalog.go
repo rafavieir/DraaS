@@ -194,6 +194,81 @@ type PowerAction struct {
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
+const (
+	RecoveryStageRequested           = "REQUESTED"
+	RecoveryStagePreflight           = "PREFLIGHT"
+	RecoveryStageAdmission           = "ADMISSION"
+	RecoveryStageNetworkPrepare      = "NETWORK_PREPARE"
+	RecoveryStageResourceProvision   = "RESOURCE_PROVISION"
+	RecoveryStageDiskMaterialize     = "DISK_MATERIALIZE"
+	RecoveryStageDiskAttach          = "DISK_ATTACH"
+	RecoveryStagePowerOn             = "POWER_ON"
+	RecoveryStageWaitGuest           = "WAIT_GUEST"
+	RecoveryStageValidateOS          = "VALIDATE_OS"
+	RecoveryStageValidateApplication = "VALIDATE_APPLICATION"
+	RecoveryStageReadyForActivation  = "READY_FOR_ACTIVATION"
+	RecoveryStageFailed              = "FAILED"
+	RecoveryStageCleanup             = "CLEANUP"
+	RecoveryStageCompleted           = "COMPLETED"
+)
+
+const (
+	OperationNotStarted = "NOT_STARTED"
+	OperationUnknown    = "UNKNOWN"
+	OperationConfirmed  = "CONFIRMED"
+	OperationFailed     = "FAILED"
+)
+
+type RecoveryOperation struct {
+	Tenant        string     `json:"tenant_id"`
+	OperationID   string     `json:"operation_id"`
+	RecoveryJobID string     `json:"recovery_job_id"`
+	Stage         string     `json:"stage"`
+	OperationType string     `json:"operation_type"`
+	Provider      string     `json:"provider"`
+	ResourceType  string     `json:"resource_type"`
+	ResourceID    string     `json:"resource_id"`
+	ProviderTask  string     `json:"provider_task_id"`
+	DesiredState  string     `json:"desired_state"`
+	Status        string     `json:"status"`
+	Attempts      int        `json:"attempt_count"`
+	StartedAt     *time.Time `json:"started_at"`
+	CompletedAt   *time.Time `json:"completed_at"`
+	LastError     string     `json:"last_error"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type ProviderResource struct {
+	ID                  string          `json:"id"`
+	Tenant              string          `json:"tenant_id"`
+	RecoveryJobID       string          `json:"recovery_job_id"`
+	ActivationSessionID string          `json:"activation_session_id"`
+	Provider            string          `json:"provider"`
+	ResourceType        string          `json:"resource_type"`
+	ProviderResourceID  string          `json:"provider_resource_id"`
+	OperationID         string          `json:"operation_id"`
+	Status              string          `json:"status"`
+	Handle              json.RawMessage `json:"handle"`
+	CleanupPolicy       string          `json:"cleanup_policy"`
+	CreatedAt           time.Time       `json:"created_at"`
+	LastSeenAt          time.Time       `json:"last_seen_at"`
+}
+
+type RecoveryLease struct {
+	Tenant         string     `json:"tenant_id"`
+	RecoveryJobID  string     `json:"recovery_job_id"`
+	Stage          string     `json:"stage"`
+	Status         string     `json:"status"`
+	Owner          string     `json:"lease_owner"`
+	ExpiresAt      *time.Time `json:"lease_expires_at"`
+	Generation     int64      `json:"lease_generation"`
+	Version        int64      `json:"version"`
+	WorkerLastSeen *time.Time `json:"worker_last_seen"`
+	DesiredState   string     `json:"desired_state"`
+	NextRetryAt    *time.Time `json:"next_retry_at"`
+}
+
 func (d *DB) Enqueue(ctx context.Context, tenant, actor, kind, resource, key string, payload any) (Job, error) {
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -249,8 +324,12 @@ func (d *DB) CreateRecoveryJob(ctx context.Context, tenant, actor, pointID, prov
 	}
 	defer tx.Rollback(ctx)
 	id := ID()
-	_, err = tx.Exec(ctx, `INSERT INTO recovery_jobs(tenant_id,id,job_id,recovery_point_id,provider_type,status,stage,keep_resources)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,job_id) DO NOTHING`, tenant, id, j.ID, pointID, providerType, j.Status, "QUEUED", keepResources)
+	desired := RecoveryStageCompleted
+	if keepResources {
+		desired = RecoveryStageReadyForActivation
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO recovery_jobs(tenant_id,id,job_id,recovery_point_id,provider_type,status,stage,keep_resources,provider_version,desired_state)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,'recovery-provider/v2',$9) ON CONFLICT(tenant_id,job_id) DO NOTHING`, tenant, id, j.ID, pointID, providerType, j.Status, RecoveryStageRequested, keepResources, desired)
 	if err != nil {
 		return RecoveryJob{}, j, err
 	}
@@ -401,6 +480,167 @@ func (d *DB) RecoveryJobReport(ctx context.Context, tenant, jobID string) (json.
 	var b json.RawMessage
 	err := d.Pool.QueryRow(ctx, "SELECT report FROM recovery_jobs WHERE tenant_id=$1 AND job_id=$2", tenant, jobID).Scan(&b)
 	return b, err
+}
+
+func (d *DB) EnsureRecoveryOperation(ctx context.Context, tenant, recoveryJobID, stage, operationType, provider, resourceType, resourceKey, desired string) (RecoveryOperation, error) {
+	opID := RecoveryOperationID(recoveryJobID, stage, operationType, resourceKey)
+	_, err := d.Pool.Exec(ctx, `INSERT INTO recovery_operations(tenant_id,operation_id,recovery_job_id,stage,operation_type,provider,resource_type,desired_state,status)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT(tenant_id,operation_id) DO NOTHING`, tenant, opID, recoveryJobID, stage, operationType, provider, resourceType, desired, OperationNotStarted)
+	if err != nil {
+		return RecoveryOperation{}, err
+	}
+	return d.RecoveryOperation(ctx, tenant, opID)
+}
+
+func (d *DB) RecoveryOperation(ctx context.Context, tenant, operationID string) (RecoveryOperation, error) {
+	var op RecoveryOperation
+	err := d.Pool.QueryRow(ctx, `SELECT tenant_id,operation_id,recovery_job_id,stage,operation_type,provider,resource_type,resource_id,provider_task_id,desired_state,status,attempt_count,started_at,completed_at,last_error,created_at,updated_at
+FROM recovery_operations WHERE tenant_id=$1 AND operation_id=$2`, tenant, operationID).Scan(&op.Tenant, &op.OperationID, &op.RecoveryJobID, &op.Stage, &op.OperationType, &op.Provider, &op.ResourceType, &op.ResourceID, &op.ProviderTask, &op.DesiredState, &op.Status, &op.Attempts, &op.StartedAt, &op.CompletedAt, &op.LastError, &op.CreatedAt, &op.UpdatedAt)
+	return op, err
+}
+
+func (d *DB) MarkRecoveryOperationStarted(ctx context.Context, tenant, operationID string) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE recovery_operations SET status=$3,attempt_count=attempt_count+1,started_at=COALESCE(started_at,now()),updated_at=now()
+WHERE tenant_id=$1 AND operation_id=$2 AND status IN ($4,$5)`, tenant, operationID, OperationUnknown, OperationNotStarted, OperationUnknown)
+	return err
+}
+
+func (d *DB) ConfirmRecoveryOperation(ctx context.Context, tenant, operationID, resourceID, providerTaskID string) error {
+	_, err := d.Pool.Exec(ctx, `UPDATE recovery_operations SET status=$3,resource_id=COALESCE(NULLIF($4,''),resource_id),provider_task_id=COALESCE(NULLIF($5,''),provider_task_id),completed_at=now(),updated_at=now(),last_error=''
+WHERE tenant_id=$1 AND operation_id=$2`, tenant, operationID, OperationConfirmed, resourceID, providerTaskID)
+	return err
+}
+
+func (d *DB) FailRecoveryOperation(ctx context.Context, tenant, operationID, status, lastErr string) error {
+	if status == "" {
+		status = OperationFailed
+	}
+	_, err := d.Pool.Exec(ctx, `UPDATE recovery_operations SET status=$3,last_error=$4,updated_at=now()
+WHERE tenant_id=$1 AND operation_id=$2`, tenant, operationID, status, lastErr)
+	return err
+}
+
+func (d *DB) UpsertProviderResource(ctx context.Context, tenant, recoveryJobID, activationSessionID, provider, resourceType, providerResourceID, operationID, status, cleanupPolicy string, handle any) (ProviderResource, error) {
+	b, err := json.Marshal(handle)
+	if err != nil {
+		return ProviderResource{}, err
+	}
+	if cleanupPolicy == "" {
+		cleanupPolicy = "TEST_EPHEMERAL"
+	}
+	id := ID()
+	_, err = d.Pool.Exec(ctx, `INSERT INTO provider_resources(tenant_id,id,recovery_job_id,activation_session_id,provider,resource_type,provider_resource_id,operation_id,status,handle,cleanup_policy)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+ON CONFLICT(tenant_id,provider,provider_resource_id) DO UPDATE SET
+ recovery_job_id=COALESCE(NULLIF(EXCLUDED.recovery_job_id,''),provider_resources.recovery_job_id),
+ activation_session_id=COALESCE(NULLIF(EXCLUDED.activation_session_id,''),provider_resources.activation_session_id),
+ operation_id=COALESCE(NULLIF(EXCLUDED.operation_id,''),provider_resources.operation_id),
+ status=EXCLUDED.status, handle=EXCLUDED.handle, cleanup_policy=EXCLUDED.cleanup_policy, last_seen_at=now()`, tenant, id, recoveryJobID, activationSessionID, provider, resourceType, providerResourceID, operationID, status, b, cleanupPolicy)
+	if err != nil {
+		return ProviderResource{}, err
+	}
+	var r ProviderResource
+	err = d.Pool.QueryRow(ctx, `SELECT id,tenant_id,recovery_job_id,activation_session_id,provider,resource_type,provider_resource_id,operation_id,status,handle,cleanup_policy,created_at,last_seen_at
+FROM provider_resources WHERE tenant_id=$1 AND provider=$2 AND provider_resource_id=$3`, tenant, provider, providerResourceID).Scan(&r.ID, &r.Tenant, &r.RecoveryJobID, &r.ActivationSessionID, &r.Provider, &r.ResourceType, &r.ProviderResourceID, &r.OperationID, &r.Status, &r.Handle, &r.CleanupPolicy, &r.CreatedAt, &r.LastSeenAt)
+	return r, err
+}
+
+func (d *DB) ProviderResourceByOperation(ctx context.Context, tenant, operationID string) (ProviderResource, error) {
+	var r ProviderResource
+	err := d.Pool.QueryRow(ctx, `SELECT id,tenant_id,recovery_job_id,activation_session_id,provider,resource_type,provider_resource_id,operation_id,status,handle,cleanup_policy,created_at,last_seen_at
+FROM provider_resources WHERE tenant_id=$1 AND operation_id=$2 ORDER BY last_seen_at DESC LIMIT 1`, tenant, operationID).Scan(&r.ID, &r.Tenant, &r.RecoveryJobID, &r.ActivationSessionID, &r.Provider, &r.ResourceType, &r.ProviderResourceID, &r.OperationID, &r.Status, &r.Handle, &r.CleanupPolicy, &r.CreatedAt, &r.LastSeenAt)
+	return r, err
+}
+
+func (d *DB) AppendRecoveryTimeline(ctx context.Context, tenant, recoveryJobID, eventType, stage, operationID string, detail any) error {
+	b, _ := json.Marshal(detail)
+	_, err := d.Pool.Exec(ctx, `INSERT INTO recovery_timeline(tenant_id,id,recovery_job_id,event_type,stage,operation_id,detail)
+VALUES($1,$2,$3,$4,$5,$6,$7)`, tenant, ID(), recoveryJobID, eventType, stage, operationID, b)
+	return err
+}
+
+func (d *DB) RunnableRecoveryJobs(ctx context.Context, limit int) ([]RecoveryLease, error) {
+	if limit < 1 || limit > 100 {
+		limit = 25
+	}
+	rows, err := d.Pool.Query(ctx, `SELECT tenant_id,job_id,stage,status,lease_owner,lease_expires_at,lease_generation,version,worker_last_seen,desired_state,next_retry_at
+FROM recovery_jobs
+WHERE status NOT IN ('COMPLETED','FAILED_FINAL','CANCELLED_FINAL')
+ AND (next_retry_at IS NULL OR next_retry_at <= now())
+ AND (lease_owner='' OR lease_expires_at IS NULL OR lease_expires_at <= now())
+ORDER BY updated_at ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RecoveryLease
+	for rows.Next() {
+		var l RecoveryLease
+		if err = rows.Scan(&l.Tenant, &l.RecoveryJobID, &l.Stage, &l.Status, &l.Owner, &l.ExpiresAt, &l.Generation, &l.Version, &l.WorkerLastSeen, &l.DesiredState, &l.NextRetryAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) AcquireRecoveryLease(ctx context.Context, tenant, recoveryJobID, owner string, ttl time.Duration) (RecoveryLease, bool, error) {
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	var l RecoveryLease
+	err := d.Pool.QueryRow(ctx, `UPDATE recovery_jobs
+SET lease_owner=$3, lease_expires_at=now()+($4::text)::interval, lease_generation=lease_generation+1, worker_last_seen=now(), version=version+1, updated_at=now()
+WHERE tenant_id=$1 AND job_id=$2
+ AND status NOT IN ('COMPLETED','FAILED_FINAL','CANCELLED_FINAL')
+ AND (lease_owner='' OR lease_expires_at IS NULL OR lease_expires_at <= now() OR lease_owner=$3)
+RETURNING tenant_id,job_id,stage,status,lease_owner,lease_expires_at,lease_generation,version,worker_last_seen,desired_state,next_retry_at`, tenant, recoveryJobID, owner, ttl.String()).Scan(&l.Tenant, &l.RecoveryJobID, &l.Stage, &l.Status, &l.Owner, &l.ExpiresAt, &l.Generation, &l.Version, &l.WorkerLastSeen, &l.DesiredState, &l.NextRetryAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RecoveryLease{}, false, nil
+	}
+	if err != nil {
+		return RecoveryLease{}, false, err
+	}
+	_ = d.AppendRecoveryTimeline(ctx, tenant, recoveryJobID, "LEASE_ACQUIRED", l.Stage, "", map[string]any{"owner": owner, "generation": l.Generation})
+	return l, true, nil
+}
+
+func (d *DB) RenewRecoveryLease(ctx context.Context, tenant, recoveryJobID, owner string, generation int64, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	tag, err := d.Pool.Exec(ctx, `UPDATE recovery_jobs
+SET lease_expires_at=now()+($5::text)::interval, worker_last_seen=now(), updated_at=now()
+WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4`, tenant, recoveryJobID, owner, generation, ttl.String())
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (d *DB) ReleaseRecoveryLease(ctx context.Context, tenant, recoveryJobID, owner string, generation int64) error {
+	tag, err := d.Pool.Exec(ctx, `UPDATE recovery_jobs
+SET lease_owner='', lease_expires_at=NULL, updated_at=now()
+WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4`, tenant, recoveryJobID, owner, generation)
+	if err == nil && tag.RowsAffected() == 1 {
+		_ = d.AppendRecoveryTimeline(ctx, tenant, recoveryJobID, "LEASE_RELEASED", "", "", map[string]any{"owner": owner, "generation": generation})
+	}
+	return err
+}
+
+func (d *DB) AdvanceRecoveryStage(ctx context.Context, tenant, recoveryJobID, owner string, generation int64, expectedVersion int64, stage, status string) (bool, error) {
+	tag, err := d.Pool.Exec(ctx, `UPDATE recovery_jobs
+SET stage=$6, status=$7, version=version+1, updated_at=now()
+WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4 AND version=$5`, tenant, recoveryJobID, owner, generation, expectedVersion, stage, status)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 1 {
+		_ = d.AppendRecoveryTimeline(ctx, tenant, recoveryJobID, "STAGE_COMPLETED", stage, "", map[string]any{"status": status, "generation": generation})
+		return true, nil
+	}
+	return false, nil
 }
 
 func (d *DB) Job(ctx context.Context, tenant, id string) (Job, error) {

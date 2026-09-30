@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/draas-platform/draas/internal/backup"
+	"github.com/draas-platform/draas/internal/catalog"
+	"github.com/draas-platform/draas/internal/failpoint"
 	"github.com/draas-platform/draas/providers/libvirtlab"
 	"os"
 	"path/filepath"
@@ -190,35 +192,59 @@ func Run(ctx context.Context, opt Options, progress func(stage string, bytes int
 	step("RESTORE_DISK")
 	started := time.Now()
 	target := filepath.Join(dir, "recovery.qcow2")
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	partial := target + ".partial"
+	if err = os.Remove(partial); err != nil && !os.IsNotExist(err) {
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
+	f, err := os.OpenFile(partial, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}
 	stats, err := opt.Engine.Restore(ctx, incremental, opt.Tenant, incremental.ID, f, stageProgress("DISK_RESTORE"))
+	if e := failpoint.Trigger(ctx, "during_disk_materialize"); e != nil && err == nil {
+		err = e
+	}
+	if err == nil {
+		err = f.Sync()
+	}
 	closeErr := f.Close()
 	if err != nil {
+		_ = os.Remove(partial)
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}
 	if closeErr != nil {
+		_ = os.Remove(partial)
 		cleanupOnError(closeErr)
 		return SignedReport{}, closeErr
 	}
-	hash, err := libvirtlab.HashFile(target)
+	hash, err := libvirtlab.HashFile(partial)
 	if err != nil {
+		_ = os.Remove(partial)
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}
 	if hash != incremental.StreamHash {
+		_ = os.Remove(partial)
 		err = fmt.Errorf("restored disk hash mismatch")
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
+	if err = os.Rename(partial, target); err != nil {
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
+	if err = failpoint.Trigger(ctx, "after_disk_materialize"); err != nil {
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}
 	report["restore"] = stats
 	report["disk_sha256"] = hash
 	step("BOOT_RECOVERY")
-	recovered, err := p.Create(ctx, opt.Tenant, opt.RunID, "recovery", target, "", true)
+	provisionOp := catalog.RecoveryOperationID(opt.RunID, catalog.RecoveryStageResourceProvision, "PROVISION_VM", "recovery")
+	recovered, err := p.CreateWithOperation(ctx, opt.Tenant, opt.RunID, "recovery", target, "", true, provisionOp, incremental.ID, "TEST")
 	if err != nil {
 		cleanupOnError(err)
 		return SignedReport{}, err
@@ -228,10 +254,23 @@ func Run(ctx context.Context, opt Options, progress func(stage string, bytes int
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}
+	if err = failpoint.Trigger(ctx, "after_power_on"); err != nil {
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
 	validationCtx, validationCancel := context.WithTimeout(ctx, 3*time.Minute)
+	if err = failpoint.Trigger(ctx, "before_app_validation"); err != nil {
+		validationCancel()
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
 	validation, err := p.Validate(validationCtx, recovered, expected)
 	validationCancel()
 	if err != nil {
+		cleanupOnError(err)
+		return SignedReport{}, err
+	}
+	if err = failpoint.Trigger(ctx, "after_app_validation"); err != nil {
 		cleanupOnError(err)
 		return SignedReport{}, err
 	}

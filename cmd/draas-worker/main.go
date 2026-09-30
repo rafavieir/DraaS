@@ -28,6 +28,7 @@ func main() {
 	}
 	defer app.Close()
 	go app.OutboxLoop(ctx)
+	go app.RecoveryReconcilerLoop(ctx)
 	if err = app.RunWorker(ctx); err != nil {
 		slog.Error("worker stopped", "error", err)
 		os.Exit(1)

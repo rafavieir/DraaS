@@ -46,7 +46,51 @@ CREATE TABLE IF NOT EXISTS recovery_jobs(
 );
 ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS keep_resources boolean NOT NULL DEFAULT false;
 ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS provider_resource_ids jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS provider_version text NOT NULL DEFAULT 'recovery-provider/v1';
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS desired_state text NOT NULL DEFAULT 'COMPLETED';
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS retryable boolean NOT NULL DEFAULT true;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS next_retry_at timestamptz;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS started_at timestamptz;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS worker_last_seen timestamptz;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS lease_owner text NOT NULL DEFAULT '';
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS lease_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE recovery_jobs ADD COLUMN IF NOT EXISTS version bigint NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS recovery_jobs_tenant_cursor ON recovery_jobs(tenant_id,id DESC);
+CREATE INDEX IF NOT EXISTS recovery_jobs_unfinished ON recovery_jobs(tenant_id,next_retry_at,status,stage) WHERE status NOT IN ('COMPLETED','FAILED_FINAL','CANCELLED_FINAL','READY_FOR_ACTIVATION');
+CREATE TABLE IF NOT EXISTS recovery_operations(
+ tenant_id text NOT NULL REFERENCES tenants(id), operation_id text NOT NULL,
+ recovery_job_id text NOT NULL, stage text NOT NULL, operation_type text NOT NULL,
+ provider text NOT NULL, resource_type text NOT NULL DEFAULT '',
+ resource_id text NOT NULL DEFAULT '', provider_task_id text NOT NULL DEFAULT '',
+ desired_state text NOT NULL, status text NOT NULL DEFAULT 'NOT_STARTED',
+ attempt_count integer NOT NULL DEFAULT 0, started_at timestamptz,
+ completed_at timestamptz, last_error text NOT NULL DEFAULT '',
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,operation_id), FOREIGN KEY(tenant_id,recovery_job_id) REFERENCES recovery_jobs(tenant_id,job_id)
+);
+CREATE INDEX IF NOT EXISTS recovery_operations_job ON recovery_operations(tenant_id,recovery_job_id,stage,operation_type);
+CREATE INDEX IF NOT EXISTS recovery_operations_status ON recovery_operations(tenant_id,status,updated_at);
+CREATE TABLE IF NOT EXISTS provider_resources(
+ tenant_id text NOT NULL REFERENCES tenants(id), id text NOT NULL,
+ recovery_job_id text NOT NULL DEFAULT '', activation_session_id text NOT NULL DEFAULT '',
+ provider text NOT NULL, resource_type text NOT NULL, provider_resource_id text NOT NULL,
+ operation_id text NOT NULL, status text NOT NULL, handle jsonb NOT NULL DEFAULT '{}',
+ cleanup_policy text NOT NULL DEFAULT 'TEST_EPHEMERAL',
+ created_at timestamptz NOT NULL DEFAULT now(), last_seen_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), UNIQUE(tenant_id,provider,provider_resource_id)
+);
+CREATE INDEX IF NOT EXISTS provider_resources_job ON provider_resources(tenant_id,recovery_job_id,resource_type);
+CREATE INDEX IF NOT EXISTS provider_resources_operation ON provider_resources(tenant_id,operation_id);
+CREATE TABLE IF NOT EXISTS recovery_timeline(
+ tenant_id text NOT NULL REFERENCES tenants(id), id text NOT NULL,
+ recovery_job_id text NOT NULL, event_type text NOT NULL, stage text NOT NULL DEFAULT '',
+ operation_id text NOT NULL DEFAULT '', detail jsonb NOT NULL DEFAULT '{}',
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id), FOREIGN KEY(tenant_id,recovery_job_id) REFERENCES recovery_jobs(tenant_id,job_id)
+);
+CREATE INDEX IF NOT EXISTS recovery_timeline_job ON recovery_timeline(tenant_id,recovery_job_id,created_at);
 CREATE TABLE IF NOT EXISTS activation_sessions(
  tenant_id text NOT NULL REFERENCES tenants(id), id text NOT NULL,
  recovery_job_id text NOT NULL, recovery_point_id text NOT NULL, provider text NOT NULL,

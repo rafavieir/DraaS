@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/draas-platform/draas/internal/backup"
+	"github.com/draas-platform/draas/internal/failpoint"
+	"github.com/draas-platform/draas/pkg/contracts"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +44,7 @@ type VM struct {
 	Isolated  bool      `json:"isolated"`
 	CreatedAt time.Time `json:"created_at"`
 	Lifetime  string    `json:"lifetime"`
+	Operation string    `json:"operation_id,omitempty"`
 }
 type Guest struct {
 	Healthy     bool     `json:"healthy"`
@@ -51,6 +54,227 @@ type Guest struct {
 	BootID      string   `json:"boot_id"`
 	OS          string   `json:"os_release"`
 	Addresses   []string `json:"addresses"`
+}
+
+func (p *Provider) Name() string { return "libvirt-lab" }
+
+func (p *Provider) Capabilities(context.Context) (contracts.RecoveryProviderCapabilities, error) {
+	return contracts.RecoveryProviderCapabilities{
+		ContractVersion:       contracts.RecoveryProviderContractV2,
+		SupportsConsole:       true,
+		SupportsHotAttach:     false,
+		SupportsNetworkCreate: false,
+		SupportsGuestAgent:    true,
+		SupportsReboot:        true,
+		SupportsForceStop:     true,
+		SupportsTags:          true,
+		SupportsAsyncTasks:    false,
+	}, nil
+}
+
+func (p *Provider) ValidateCredentials(ctx context.Context) error {
+	_, err := p.Health(ctx)
+	return err
+}
+
+func handleFromVM(v VM) contracts.ResourceHandle {
+	return contracts.ResourceHandle{ProviderResourceID: v.ID, ProviderCluster: "libvirt-qemu-system", Metadata: map[string]string{
+		"tenant":       v.Tenant,
+		"run_id":       v.RunID,
+		"disk":         v.Disk,
+		"http_port":    strconv.Itoa(v.HTTPPort),
+		"ssh_port":     strconv.Itoa(v.SSHPort),
+		"isolated":     strconv.FormatBool(v.Isolated),
+		"lifetime":     v.Lifetime,
+		"operation_id": v.Operation,
+	}}
+}
+
+func vmFromHandle(h contracts.ResourceHandle) (VM, error) {
+	if !safeVM(h.ProviderResourceID) {
+		return VM{}, errors.New("invalid libvirt resource handle")
+	}
+	m := h.Metadata
+	if m == nil {
+		m = map[string]string{}
+	}
+	httpPort, _ := strconv.Atoi(m["http_port"])
+	sshPort, _ := strconv.Atoi(m["ssh_port"])
+	isolated, _ := strconv.ParseBool(m["isolated"])
+	return VM{
+		ID:        h.ProviderResourceID,
+		Tenant:    m["tenant"],
+		RunID:     m["run_id"],
+		Disk:      m["disk"],
+		HTTPPort:  httpPort,
+		SSHPort:   sshPort,
+		Isolated:  isolated,
+		Lifetime:  m["lifetime"],
+		Operation: m["operation_id"],
+	}, nil
+}
+
+func (p *Provider) Provision(context.Context, string, contracts.WorkloadSpec) (contracts.ResourceHandle, error) {
+	return contracts.ResourceHandle{}, errors.New("libvirt lab provision is orchestrated by the recovery engine restore flow")
+}
+
+func (p *Provider) GetResource(ctx context.Context, h contracts.ResourceHandle) (contracts.ProviderResource, error) {
+	v, err := vmFromHandle(h)
+	if err != nil {
+		return contracts.ProviderResource{}, err
+	}
+	state, err := p.State(ctx, v)
+	if err != nil {
+		return contracts.ProviderResource{}, err
+	}
+	return contracts.ProviderResource{Handle: h, Kind: "vm", State: state, ManagedBy: "draas", TenantID: v.Tenant}, nil
+}
+
+func (p *Provider) CreateNetwork(context.Context, string, contracts.NetworkSpec) (contracts.ResourceHandle, error) {
+	return contracts.ResourceHandle{}, errors.New("libvirt lab uses per-VM isolated user networking and does not create external networks")
+}
+
+func (p *Provider) DeleteNetwork(context.Context, string, contracts.ResourceHandle) error {
+	return errors.New("libvirt lab uses per-VM isolated user networking and does not delete external networks")
+}
+
+func (p *Provider) AttachDisk(context.Context, string, contracts.ResourceHandle, contracts.DiskSpec) (contracts.ResourceHandle, error) {
+	return contracts.ResourceHandle{}, errors.New("libvirt lab disk attachment is performed during VM definition")
+}
+
+func (p *Provider) ConfigureNetwork(context.Context, string, contracts.ResourceHandle, contracts.NetworkSpec) error {
+	return errors.New("libvirt lab network is immutable after VM definition")
+}
+
+type V2Provider struct{ Provider *Provider }
+
+func (p *Provider) ContractV2() contracts.RecoveryProviderV2 {
+	return V2Provider{Provider: p}
+}
+
+func (v V2Provider) Name() string { return v.Provider.Name() }
+func (v V2Provider) Capabilities(ctx context.Context) (contracts.RecoveryProviderCapabilities, error) {
+	return v.Provider.Capabilities(ctx)
+}
+func (v V2Provider) Health(ctx context.Context) (map[string]string, error) {
+	return v.Provider.Health(ctx)
+}
+func (v V2Provider) ValidateCredentials(ctx context.Context) error {
+	return v.Provider.ValidateCredentials(ctx)
+}
+func (v V2Provider) Provision(ctx context.Context, operationID string, spec contracts.WorkloadSpec) (contracts.ResourceHandle, error) {
+	return v.Provider.Provision(ctx, operationID, spec)
+}
+func (v V2Provider) GetResource(ctx context.Context, h contracts.ResourceHandle) (contracts.ProviderResource, error) {
+	return v.Provider.GetResource(ctx, h)
+}
+func (v V2Provider) CreateNetwork(ctx context.Context, operationID string, spec contracts.NetworkSpec) (contracts.ResourceHandle, error) {
+	return v.Provider.CreateNetwork(ctx, operationID, spec)
+}
+func (v V2Provider) DeleteNetwork(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	return v.Provider.DeleteNetwork(ctx, operationID, h)
+}
+func (v V2Provider) AttachDisk(ctx context.Context, operationID string, vm contracts.ResourceHandle, disk contracts.DiskSpec) (contracts.ResourceHandle, error) {
+	return v.Provider.AttachDisk(ctx, operationID, vm, disk)
+}
+func (v V2Provider) ConfigureNetwork(ctx context.Context, operationID string, vm contracts.ResourceHandle, network contracts.NetworkSpec) error {
+	return v.Provider.ConfigureNetwork(ctx, operationID, vm, network)
+}
+func (v V2Provider) Start(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return err
+	}
+	return v.Provider.Start(ctx, vm)
+}
+func (v V2Provider) Shutdown(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return err
+	}
+	return v.Provider.Stop(ctx, vm)
+}
+func (v V2Provider) Reboot(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return err
+	}
+	return v.Provider.Reboot(ctx, vm)
+}
+func (v V2Provider) ForceStop(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return err
+	}
+	return v.Provider.ForceStop(ctx, vm)
+}
+func (v V2Provider) GetPowerState(ctx context.Context, h contracts.ResourceHandle) (contracts.PowerState, error) {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return contracts.PowerState{}, err
+	}
+	state, err := v.Provider.State(ctx, vm)
+	return contracts.PowerState{State: state}, err
+}
+func (v V2Provider) GetGuestState(ctx context.Context, h contracts.ResourceHandle) (contracts.GuestState, error) {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return contracts.GuestState{}, err
+	}
+	g, err := v.Provider.Guest(ctx, vm)
+	if err != nil {
+		return contracts.GuestState{}, err
+	}
+	return contracts.GuestState{Healthy: g.Healthy, BootID: g.BootID, Details: map[string]string{"database": g.Database, "marker_sha256": g.MarkerHash, "os_release": g.OS}}, nil
+}
+func (v V2Provider) OpenConsole(ctx context.Context, h contracts.ResourceHandle) (contracts.ConsoleSession, error) {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return contracts.ConsoleSession{}, err
+	}
+	if vm.SSHPort == 0 {
+		return contracts.ConsoleSession{}, errors.New("console requires ssh port in provider handle metadata")
+	}
+	return contracts.ConsoleSession{Protocol: "ssh", URL: fmt.Sprintf("ssh://root@127.0.0.1:%d", vm.SSHPort)}, nil
+}
+func (v V2Provider) Delete(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return err
+	}
+	return v.Provider.Delete(ctx, vm)
+}
+func (v V2Provider) ListManagedResources(ctx context.Context) ([]contracts.ProviderResource, error) {
+	rows, err := virsh(ctx, "list", "--all", "--name")
+	if err != nil {
+		return nil, err
+	}
+	var resources []contracts.ProviderResource
+	for _, id := range strings.Fields(rows) {
+		if !safeVM(id) {
+			continue
+		}
+		vm, err := v.Provider.VMFromDomain(ctx, id)
+		if err != nil {
+			continue
+		}
+		state, _ := v.Provider.State(ctx, vm)
+		resources = append(resources, contracts.ProviderResource{Handle: handleFromVM(vm), Kind: "vm", State: state, ManagedBy: "draas", TenantID: vm.Tenant})
+	}
+	return resources, nil
+}
+
+func (v V2Provider) FindResourceByOperation(ctx context.Context, operationID string) (contracts.ProviderResource, bool, error) {
+	resources, err := v.ListManagedResources(ctx)
+	if err != nil {
+		return contracts.ProviderResource{}, false, err
+	}
+	for _, r := range resources {
+		if r.Handle.Metadata["operation_id"] == operationID {
+			return r, true, nil
+		}
+	}
+	return contracts.ProviderResource{}, false, nil
 }
 
 func New(root, fixture string) (*Provider, error) {
@@ -286,6 +510,10 @@ runcmd:
 	return vm, checksum, err
 }
 func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed string, isolated bool) (VM, error) {
+	return p.CreateWithOperation(ctx, tenant, run, suffix, disk, seed, isolated, "", "", "TEST")
+}
+
+func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, suffix, disk, seed string, isolated bool, operationID, recoveryPointID, environmentType string) (VM, error) {
 	if !backup.ValidID(tenant) || !backup.ValidID(suffix) {
 		return VM{}, errors.New("invalid resource identity")
 	}
@@ -320,7 +548,10 @@ func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed s
 	if err != nil {
 		return VM{}, err
 	}
-	v := VM{ID: id, Tenant: tenant, RunID: run, Disk: disk, HTTPPort: hp, SSHPort: sp, Isolated: isolated, CreatedAt: time.Now().UTC(), Lifetime: "TEMPORARY_TEST"}
+	if environmentType == "" {
+		environmentType = "TEST"
+	}
+	v := VM{ID: id, Tenant: tenant, RunID: run, Disk: disk, HTTPPort: hp, SSHPort: sp, Isolated: isolated, CreatedAt: time.Now().UTC(), Lifetime: "TEMPORARY_TEST", Operation: operationID}
 	restrict := "off"
 	if isolated {
 		restrict = "on"
@@ -329,7 +560,7 @@ func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed s
 	if seed != "" {
 		cd = fmt.Sprintf("<disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='%s'/><target dev='sda' bus='sata'/><readonly/></disk>", xmlEscape(seed))
 	}
-	body := fmt.Sprintf(`<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'><name>%s</name><metadata><draas:resource xmlns:draas='https://draas.local/draas' managed_by='draas' tenant_id='%s' recovery_job_id='%s' lifetime='TEMPORARY_TEST'/></metadata><memory unit='MiB'>512</memory><vcpu>1</vcpu><os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os><features><acpi/><apic/></features><cpu mode='host-passthrough'/><on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none'/><source file='%s'/><target dev='vda' bus='virtio'/></disk>%s<serial type='file'><source path='%s'/><target port='0'/></serial><console type='file'><source path='%s'/><target type='serial' port='0'/></console><memballoon model='none'/></devices><qemu:commandline><qemu:arg value='-netdev'/><qemu:arg value='user,id=labnet,restrict=%s,hostfwd=tcp:127.0.0.1:%d-:8080,hostfwd=tcp:127.0.0.1:%d-:22'/><qemu:arg value='-device'/><qemu:arg value='virtio-net-pci,netdev=labnet,mac=52:54:00:44:52:01,addr=0x10'/></qemu:commandline></domain>`, id, tenant, run, xmlEscape(disk), cd, xmlEscape(filepath.Join(dir, suffix+"-serial.log")), xmlEscape(filepath.Join(dir, suffix+"-serial.log")), restrict, hp, sp)
+	body := fmt.Sprintf(`<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'><name>%s</name><metadata><draas:resource xmlns:draas='https://draas.local/draas' managed_by='draas' tenant_id='%s' recovery_job_id='%s' operation_id='%s' recovery_point_id='%s' environment_type='%s' lifetime='TEMPORARY_TEST'/></metadata><memory unit='MiB'>512</memory><vcpu>1</vcpu><os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os><features><acpi/><apic/></features><cpu mode='host-passthrough'/><on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none'/><source file='%s'/><target dev='vda' bus='virtio'/></disk>%s<serial type='file'><source path='%s'/><target port='0'/></serial><console type='file'><source path='%s'/><target type='serial' port='0'/></console><memballoon model='none'/></devices><qemu:commandline><qemu:arg value='-netdev'/><qemu:arg value='user,id=labnet,restrict=%s,hostfwd=tcp:127.0.0.1:%d-:8080,hostfwd=tcp:127.0.0.1:%d-:22'/><qemu:arg value='-device'/><qemu:arg value='virtio-net-pci,netdev=labnet,mac=52:54:00:44:52:01,addr=0x10'/></qemu:commandline></domain>`, id, tenant, run, operationID, recoveryPointID, environmentType, xmlEscape(disk), cd, xmlEscape(filepath.Join(dir, suffix+"-serial.log")), xmlEscape(filepath.Join(dir, suffix+"-serial.log")), restrict, hp, sp)
 	xmlPath := filepath.Join(dir, suffix+".xml")
 	if err = os.WriteFile(xmlPath, []byte(body), 0600); err != nil {
 		return v, err
@@ -337,11 +568,61 @@ func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed s
 	if _, err = virsh(ctx, "define", xmlPath); err != nil {
 		return v, err
 	}
+	if err = failpoint.Trigger(ctx, "after_provider_call_before_persist"); err != nil {
+		return v, err
+	}
+	if err = failpoint.Trigger(ctx, "after_vm_create"); err != nil {
+		return v, err
+	}
 	b, _ := json.MarshalIndent(v, "", "  ")
 	if err = os.WriteFile(record, b, 0600); err != nil {
 		return v, err
 	}
 	return v, nil
+}
+
+func (p *Provider) VMFromDomain(ctx context.Context, id string) (VM, error) {
+	if !safeVM(id) {
+		return VM{}, errors.New("unmanaged domain")
+	}
+	definition, err := virsh(ctx, "dumpxml", id)
+	if err != nil {
+		return VM{}, err
+	}
+	var domain struct {
+		Metadata struct {
+			Resource struct {
+				Managed     string `xml:"managed_by,attr"`
+				Tenant      string `xml:"tenant_id,attr"`
+				Run         string `xml:"recovery_job_id,attr"`
+				Operation   string `xml:"operation_id,attr"`
+				Lifetime    string `xml:"lifetime,attr"`
+				Environment string `xml:"environment_type,attr"`
+			} `xml:"resource"`
+		} `xml:"metadata"`
+	}
+	if xml.Unmarshal([]byte(definition), &domain) != nil || domain.Metadata.Resource.Managed != "draas" {
+		return VM{}, errors.New("domain is not managed by draas")
+	}
+	vm := VM{ID: id, Tenant: domain.Metadata.Resource.Tenant, RunID: domain.Metadata.Resource.Run, Lifetime: domain.Metadata.Resource.Lifetime, Operation: domain.Metadata.Resource.Operation}
+	if vm.Lifetime == "" {
+		vm.Lifetime = "TEMPORARY_TEST"
+	}
+	if backup.ValidID(vm.RunID) {
+		dir, err := p.Dir(vm.RunID)
+		if err == nil {
+			suffix := strings.TrimPrefix(id, "draas-lab-"+vm.RunID+"-")
+			record := filepath.Join(dir, suffix+"-vm.json")
+			if b, err := os.ReadFile(record); err == nil {
+				var recorded VM
+				if json.Unmarshal(b, &recorded) == nil && recorded.ID == id {
+					recorded.Operation = vm.Operation
+					return recorded, nil
+				}
+			}
+		}
+	}
+	return vm, nil
 }
 func (p *Provider) State(ctx context.Context, v VM) (string, error) {
 	if !safeVM(v.ID) {

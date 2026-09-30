@@ -17,7 +17,7 @@
 
 ## IN PROGRESS
 
-- [ ] P3D.1 Recovery Provider Contract v2: provider primitives, capabilities, persistent handles, state-machine persistence, idempotency tests and old/new worker safety.
+- [ ] P3D.1 Recovery Provider Contract v2: provider primitives, capabilities, persistent handles, job v1/v2 routing and persistent state-machine schema/helpers started; lease generation/fencing, scanner and failpoints started; libvirt operation metadata, UNKNOWN provision intent, provider resource recording, partial-disk safety and invariant checker started; full one-transition real recovery handlers and live crash matrix remain.
 - [ ] P3D.2 Multi-store backup redundancy: BackupStoreSet, replica states, async/sync policies, failover reads and repair jobs.
 - [ ] P3D.3 Control-plane disaster recovery: rebuild catalog from signed durable artifacts after PostgreSQL/NATS loss.
 - [ ] P3D.4 Scheduled DR validation: RecoveryTestPolicy, jittered schedules, sandbox recovery, signed reports and cleanup state.

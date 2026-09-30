@@ -1,0 +1,69 @@
+{{- if .Values.observability }}
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: draas-prometheus, namespace: {{ .Values.namespace }}}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+    rule_files: [/etc/prometheus/alerts.yml]
+    scrape_configs:
+      - job_name: draas
+        metrics_path: /api/v1/metrics
+        authorization:
+          type: Bearer
+          credentials_file: /var/run/draas-metrics/token
+        static_configs:
+          - targets: [draas-api:8080]
+  alerts.yml: |
+    groups:
+      - name: draas
+        rules:
+          - alert: DRPlatformUnavailable
+            expr: up{job="draas"} == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations: {summary: "DR API metrics unavailable"}
+          - alert: DRJobFailed
+            expr: draas_failed_jobs > 0
+            for: 1m
+            labels: {severity: warning}
+            annotations: {summary: "Inspect failed jobs and their correlation IDs"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: draas-prometheus, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: draas-prometheus}}
+  template:
+    metadata: {labels: {app: draas-prometheus}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, fsGroup: 65534}
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.5.0
+          args: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=3d"]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: "1", memory: 256Mi}}
+          ports: [{containerPort: 9090}]
+          readinessProbe: {httpGet: {path: /-/ready, port: 9090}, initialDelaySeconds: 5}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: auth, mountPath: /var/run/draas-metrics, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - {name: config, configMap: {name: draas-prometheus}}
+        - name: auth
+          secret:
+            secretName: {{ .Values.secretName }}
+            items: [{key: METRICS_TOKEN, path: token}]
+        - {name: data, emptyDir: {sizeLimit: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: draas-prometheus, namespace: {{ .Values.namespace }}}
+spec: {selector: {app: draas-prometheus}, ports: [{port: 9090}]}
+{{- end }}

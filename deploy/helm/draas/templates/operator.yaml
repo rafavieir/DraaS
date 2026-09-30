@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: draas-operator, namespace: {{ .Values.namespace }}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: draas-operator, namespace: {{ .Values.namespace }}}
+rules:
+  - apiGroups: [dr.draas.local]
+    resources: [protectedworkloads, protectionpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [dr.draas.local]
+    resources: [protectedworkloads/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: draas-operator, namespace: {{ .Values.namespace }}}
+subjects: [{kind: ServiceAccount, name: draas-operator, namespace: {{ .Values.namespace }}}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: draas-operator}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: draas-operator, namespace: {{ .Values.namespace }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: draas-operator}}
+  template:
+    metadata: {labels: {app: draas-operator}}
+    spec:
+      serviceAccountName: draas-operator
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: operator
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [/usr/local/bin/draas-operator]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.secretName }}, key: DATABASE_URL}}
+            - {name: OPERATOR_NAMESPACE, value: {{ .Values.namespace }}}
+            - {name: OPERATOR_TENANT, value: {{ .Values.tenant }}}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: "1", memory: 256Mi}}
+          readinessProbe: {httpGet: {path: /readyz, port: 8081}, initialDelaySeconds: 5, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /healthz, port: 8081}, initialDelaySeconds: 15, periodSeconds: 20}
+---
+apiVersion: dr.draas.local/v1alpha1
+kind: ProtectionPolicy
+metadata: {name: lab-standard, namespace: {{ .Values.namespace }}}
+spec: {rpoSeconds: 3600, rtoSeconds: 120}
+

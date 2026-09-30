@@ -1,0 +1,1 @@
+{"name":"draas-ui-tests","private":true,"type":"module","scripts":{"check":"node --check web/app.js","test:ui":"playwright test"},"devDependencies":{"@playwright/test":"^1.63.0"}}

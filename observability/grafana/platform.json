@@ -1,0 +1,10 @@
+{
+  "uid": "draas-lab", "title": "DR Platform · Simulator Lab", "schemaVersion": 39, "version": 1,
+  "tags": ["draas", "simulator"], "refresh": "30s", "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {"id": 1, "type": "stat", "title": "Verified recovery points", "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0}, "datasource": {"type": "prometheus", "uid": "draas"}, "targets": [{"expr": "draas_verified_recovery_points", "refId": "A"}]},
+    {"id": 2, "type": "stat", "title": "Failed jobs · investigate", "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0}, "datasource": {"type": "prometheus", "uid": "draas"}, "targets": [{"expr": "draas_failed_jobs", "refId": "A"}]},
+    {"id": 3, "type": "stat", "title": "Logical backup bytes (not physical usage)", "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0}, "datasource": {"type": "prometheus", "uid": "draas"}, "fieldConfig": {"defaults": {"unit": "bytes"}}, "targets": [{"expr": "draas_logical_backup_bytes", "refId": "A"}]},
+    {"id": 4, "type": "text", "title": "Scope of evidence", "gridPos": {"h": 4, "w": 24, "x": 0, "y": 5}, "options": {"mode": "markdown", "content": "This lab verifies encrypted data recovery. It does **not** boot a guest or establish production RTO, WORM or HA. Refer to signed recovery reports and the production acceptance backlog."}}
+  ]
+}

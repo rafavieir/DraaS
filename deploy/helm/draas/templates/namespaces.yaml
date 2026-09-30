@@ -1,0 +1,10 @@
+{{- range list "draas-system" "draas-connectors" "draas-backup" "draas-audit" "draas-recovery" "draas-observability" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . }}
+  labels:
+    app.kubernetes.io/part-of: draas
+    pod-security.kubernetes.io/enforce: baseline
+---
+{{- end }}

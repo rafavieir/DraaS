@@ -1,0 +1,2 @@
+# ADR 003 — Fixed chunks and independently recoverable manifests
+Accepted. Start at 1 MiB fixed chunk size, Zstandard, SHA-256, tenant-scoped AES-256-GCM and Ed25519 manifests. Follow-up backups rescan the source, upload only missing chunks and retain a complete block map (synthetic full). This is deduplication, not CBT. HKDF-derived tenant keys are a lab key provider; KMS is a replacement boundary. Random nonces; no convergent encryption. Merkle trees use domain-separated leaves/parents. Deep audit is scheduled separately from ingest.

@@ -1,0 +1,17 @@
+groups:
+  - name: draas-lab
+    rules:
+      - alert: DRPlatformUnavailable
+        expr: up{job="draas"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: DR API metrics cannot be reached
+          action: Inspect Kubernetes API pod, credentials and PostgreSQL/NATS readiness.
+      - alert: DRJobFailed
+        expr: draas_failed_jobs > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: One or more lab jobs failed
+          action: Inspect job error and correlation ID before retrying.

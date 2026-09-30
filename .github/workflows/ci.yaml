@@ -1,0 +1,38 @@
+name: verify
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.26.x', cache: true}
+      - name: Format
+        run: test -z "$(gofmt -l cmd internal pkg connectors providers tests web)"
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: go test ./internal/backup -fuzz FuzzManifestValidation -fuzztime 10s
+      - run: go test ./internal/backup -run '^$' -bench . -benchmem
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - run: docker build -t draas-platform:ci .
+      - uses: anchore/sbom-action@v0
+        with: {image: 'draas-platform:ci', format: spdx-json, output-file: sbom.spdx.json}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification
+          path: |
+            coverage.out
+            sbom.spdx.json
+  ui-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: npm ci
+      - run: npm run check
+      - run: npm audit --audit-level=high
+# Kubernetes E2E runs via scripts/test-lab.ps1 locally. Automated ephemeral CI lab,
+# signed registry publishing and deployment promotion remain backlog; no fake jobs.

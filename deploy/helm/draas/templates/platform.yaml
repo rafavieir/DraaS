@@ -1,0 +1,55 @@
+{{- range list "api" "worker" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: draas-{{ . }}
+  namespace: {{ $.Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: draas-{{ . }}}
+  template:
+    metadata:
+      labels: {app: draas-{{ . }}}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: {{ . }}
+          image: {{ $.Values.image }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          command: [/usr/local/bin/draas-{{ . }}]
+          envFrom: [{secretRef: {name: {{ $.Values.secretName }}}}]
+          env:
+            - {name: LISTEN_ADDR, value: "0.0.0.0:8080"}
+            - {name: BRAND_NAME, value: {{ $.Values.brand | quote }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 96Mi}
+            limits: {cpu: "2", memory: 512Mi}
+          volumeMounts: [{name: scratch, mountPath: /tmp}]
+          {{- if eq . "api" }}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe: {httpGet: {path: /readyz, port: http}, initialDelaySeconds: 3, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10, periodSeconds: 15}
+          {{- end }}
+      volumes: [{name: scratch, emptyDir: {sizeLimit: 1Gi}}]
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: draas-api
+  namespace: {{ .Values.namespace }}
+spec:
+  selector: {app: draas-api}
+  ports: [{port: 8080, targetPort: http, name: http}]

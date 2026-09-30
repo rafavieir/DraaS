@@ -1,0 +1,139 @@
+openapi: 3.1.0
+info:
+  title: DR Platform API
+  version: 0.1.0
+  description: Simulator laboratory API. No endpoint claims real VM boot or production recovery.
+servers: [{url: /api/v1}]
+security: [{bearerAuth: []}]
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    ID: {in: path, name: id, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,100}$'}}
+    Idempotency: {in: header, name: Idempotency-Key, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9_-]{1,100}$'}}
+    Limit: {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}
+    Cursor: {in: query, name: cursor, schema: {type: string, maxLength: 100}}
+  schemas:
+    Error:
+      type: object
+      required: [error_code, message, component, operation, retryable, correlation_id]
+      properties:
+        error_code: {type: string}
+        message: {type: string}
+        component: {type: string}
+        operation: {type: string}
+        retryable: {type: boolean}
+        correlation_id: {type: string}
+    Job:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [backup, verify, test, restore]}
+        status: {type: string, enum: [QUEUED, RUNNING, RETRYING, COMPLETED, FAILED, CANCELLED]}
+        progress_bytes: {type: integer, format: int64}
+        attempts: {type: integer}
+        result: {type: [object, 'null']}
+        error: {type: string}
+        created_at: {type: string, format: date-time}
+    Page:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {type: object}}
+        next_cursor: {type: string}
+  responses:
+    Page: {description: Bounded page, content: {application/json: {schema: {$ref: '#/components/schemas/Page'}}}}
+    Accepted: {description: Durable job accepted or existing idempotent job returned, content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}
+    Error: {description: Structured error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+paths:
+  /branding:
+    get:
+      security: []
+      responses: {'200': {description: White-label name and lab mode}}
+  /session:
+    get:
+      responses: {'200': {description: Server-bound tenant, role and actor}, '401': {$ref: '#/components/responses/Error'}}
+  /overview:
+    get:
+      responses: {'200': {description: Live catalog health; production RTO and capacity remain unknown}}
+  /infrastructure:
+    get:
+      responses: {'200': {description: PostgreSQL, NATS and S3 health checks}}
+  /signing-key:
+    get:
+      responses: {'200': {description: Configured trusted Ed25519 public key in base64}}
+  /metrics:
+    get:
+      responses: {'200': {description: Tenant-scoped Prometheus text metrics}}
+  /workloads:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/Page'}}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, size_mib]
+              additionalProperties: false
+              properties:
+                name: {type: string, minLength: 1, maxLength: 120}
+                size_mib: {type: integer, minimum: 1, maximum: 256}
+      responses: {'201': {description: Synthetic workload created}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+  /workloads/{id}/backup:
+    post:
+      parameters: [{$ref: '#/components/parameters/ID'}, {$ref: '#/components/parameters/Idempotency'}]
+      responses: {'202': {$ref: '#/components/responses/Accepted'}, '409': {$ref: '#/components/responses/Error'}}
+  /workloads/{id}/mutate:
+    post:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Incremented synthetic source revision}}
+  /workloads/{id}/delete-source:
+    post:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties: {confirm: {type: string, description: Must exactly equal workload ID}}
+      responses: {'200': {description: Only synthetic origin removed; points retained}, '400': {$ref: '#/components/responses/Error'}}
+  /recovery-points:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/Page'}}
+  /recovery-points/{id}/{action}:
+    post:
+      parameters:
+        - {$ref: '#/components/parameters/ID'}
+        - {$ref: '#/components/parameters/Idempotency'}
+        - {in: path, name: action, required: true, schema: {type: string, enum: [verify, test, restore]}}
+      responses: {'202': {$ref: '#/components/responses/Accepted'}, '409': {$ref: '#/components/responses/Error'}}
+  /recovery-points/{id}/manifest:
+    get:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Authenticated signed complete block map}, '409': {$ref: '#/components/responses/Error'}}
+  /jobs:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/Page'}}
+  /jobs/{id}:
+    get:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Execution status and optional signed evidence, content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}}
+  /jobs/{id}/cancel:
+    post:
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {description: Cancellation persisted and audited}, '404': {$ref: '#/components/responses/Error'}}
+  /tests:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/Page'}}
+  /audit:
+    get:
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses: {'200': {$ref: '#/components/responses/Page'}}

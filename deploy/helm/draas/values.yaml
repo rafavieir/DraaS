@@ -1,0 +1,10 @@
+image: draas-platform:lab
+imagePullPolicy: IfNotPresent
+namespace: draas-system
+tenant: lab-tenant
+brand: DraaS
+secretName: draas-config
+# External S3 is intentionally NOT a workload in this chart.
+labDependencies: true
+observability: true
+

@@ -1,0 +1,2 @@
+# ADR 004 — Honest simulator and lightweight UI
+Accepted. The initial recovery provider validates a synthetic application image without a VM. Reports explicitly state simulation and boot_verified=false. ZSvirt will use its official REST API, never fabricated endpoints. Initial UI uses browser-native ES modules and Go-embedded static assets: no frontend runtime/build dependency, no mock metrics. Branding is returned by API configuration. Add React only when component/state complexity justifies it.

@@ -1,0 +1,91 @@
+# Local configuration, secrets and runtime state
+.local/
+.env
+.env.*
+!.env.example
+*.env
+*.local
+*.secret
+*.secrets
+secrets.json
+lab-secrets.json
+kubeconfig
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# Build outputs and binaries
+bin/
+dist/
+build/
+out/
+release/
+coverage.out
+coverage.*
+*.coverprofile
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.obj
+*.out
+*.pid
+
+# Go workspace/cache artifacts
+go.work
+go.work.sum
+vendor/
+
+# Node / Playwright
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.npm/
+.yarn/
+.pnpm-store/
+*.tsbuildinfo
+
+# Lab and acceptance artifacts generated during DR runs
+artifacts/
+docs/evidence/
+*.qcow2
+*.img
+*.raw
+*.vmdk
+*.iso
+*.ova
+*.ovf
+*.tar
+*.tgz
+*.zip
+*.7z
+
+# Logs and temporary files
+*.log
+*.trace
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE/editor metadata
+.vscode/
+.idea/
+*.code-workspace
+
+# OS and tool caches
+.cache/
+.tmp/
+tmp/

@@ -40,3 +40,26 @@ func TerminalRecoveryStatus(status string) bool {
 		return false
 	}
 }
+
+func CanTransition(from, to string) bool {
+	if from == "" || from == "QUEUED" {
+		from = RecoveryStageRequested
+	}
+	allowed := map[string]string{
+		RecoveryStageRequested:           RecoveryStagePreflight,
+		RecoveryStagePreflight:           RecoveryStageAdmission,
+		RecoveryStageAdmission:           RecoveryStageNetworkPrepare,
+		RecoveryStageNetworkPrepare:      RecoveryStageResourceProvision,
+		RecoveryStageResourceProvision:   RecoveryStageDiskMaterialize,
+		RecoveryStageDiskMaterialize:     RecoveryStageDiskAttach,
+		RecoveryStageDiskAttach:          RecoveryStagePowerOn,
+		RecoveryStagePowerOn:             RecoveryStageWaitGuest,
+		RecoveryStageWaitGuest:           RecoveryStageValidateOS,
+		RecoveryStageValidateOS:          RecoveryStageValidateApplication,
+		RecoveryStageValidateApplication: RecoveryStageReadyForActivation,
+	}
+	if to == RecoveryStageFailed || to == RecoveryStageCleanup {
+		return true
+	}
+	return allowed[from] == to
+}

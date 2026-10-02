@@ -1,0 +1,68 @@
+{{- if eq .Values.protection.backend "kubernetes-zfs" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: draas-recovery-worker
+  namespace: {{ .Values.k8sZfs.recoveryNamespace }}
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, pods]
+    verbs: [get, list, watch, create, patch, update]
+  - apiGroups: [snapshot.storage.k8s.io]
+    resources: [volumesnapshots]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: draas-recovery-worker
+  namespace: {{ .Values.k8sZfs.recoveryNamespace }}
+subjects:
+  - kind: ServiceAccount
+    name: draas-worker
+    namespace: {{ .Values.namespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: draas-recovery-worker}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: draas-{{ .Release.Name }}-storageclass-reader
+rules:
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: draas-{{ .Release.Name }}-storageclass-reader
+subjects:
+  - kind: ServiceAccount
+    name: draas-worker
+    namespace: {{ .Values.namespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: draas-{{ .Release.Name }}-storageclass-reader}
+{{- else if eq .Values.protection.backend "velero" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: draas-velero-worker
+  namespace: {{ .Values.velero.namespace }}
+rules:
+  - apiGroups: [velero.io]
+    resources: [backups, restores, backupstoragelocations]
+    verbs: [get, list, watch]
+  - apiGroups: [velero.io]
+    resources: [restores]
+    verbs: [create, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: draas-velero-worker
+  namespace: {{ .Values.velero.namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: draas-worker
+    namespace: {{ .Values.namespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: draas-velero-worker}
+{{- end }}

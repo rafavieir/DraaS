@@ -219,8 +219,17 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 			slog.Error("persist progress", "correlation_id", j.ID, "error", err)
 		}
 	}
+	requireObjectStore := func() error {
+		if a.Engine == nil || a.Engine.Store == nil || a.Store == nil {
+			return errors.New("object storage workflow unavailable when DRAAS_PROTECTION_BACKEND uses block/Kubernetes recovery")
+		}
+		return nil
+	}
 	switch j.Kind {
 	case "backup":
+		if err := requireObjectStore(); err != nil {
+			return nil, err
+		}
 		var w catalog.Workload
 		if err := json.Unmarshal(j.Payload, &w); err != nil {
 			return nil, err
@@ -251,6 +260,9 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 		}
 		return map[string]any{"recovery_point": m.ID, "stats": stats, "state": "STORED", "audit": "QUEUED"}, nil
 	case "verify":
+		if err := requireObjectStore(); err != nil {
+			return nil, err
+		}
 		m, s, err := a.Engine.Verify(ctx, j.Tenant, j.ResourceID)
 		if err != nil {
 			_ = a.DB.SetPointStatus(ctx, j.Tenant, j.ResourceID, "INVALID")
@@ -261,6 +273,9 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 		}
 		return map[string]any{"manifest_hash": m.StreamHash, "merkle_root": m.MerkleRoot, "signature": "VERIFIED", "immutability": "NOT_CONFIGURED", "anchor": "NOT_CONFIGURED", "stats": s}, nil
 	case "test", "restore":
+		if err := requireObjectStore(); err != nil {
+			return nil, err
+		}
 		started := time.Now().UTC()
 		status, err := a.DB.PointStatus(ctx, j.Tenant, j.ResourceID)
 		if err != nil {
@@ -439,10 +454,14 @@ func (a *App) execute(ctx context.Context, j catalog.Job) (any, error) {
 		}
 		_ = a.DB.AppendRecoveryTimeline(ctx, j.Tenant, j.ID, "OPERATION_INTENT_PERSISTED", catalog.RecoveryStageResourceProvision, provisionOp.OperationID, map[string]any{"operation_type": "PROVISION_VM", "status": catalog.OperationUnknown})
 		_ = a.DB.UpdateRecoveryJob(ctx, j.Tenant, j.ID, "RUNNING", "PREPARING", "", "", nil, nil)
+		if a.Config.ProtectionBackend == "zfs" || a.Config.ProtectionBackend == "kubernetes-zfs" || a.Config.ProtectionBackend == "velero" {
+			_ = a.DB.AppendRecoveryTimeline(ctx, j.Tenant, j.ID, "RECOVERY_RECONCILER_DRIVEN", catalog.RecoveryStageResourceProvision, provisionOp.OperationID, map[string]any{"protection_backend": a.Config.ProtectionBackend, "storage_backend": a.Config.StorageBackend, "billable": false})
+			return map[string]any{"recovery_job_status": "RUNNING", "recovery_driver": "reconciler", "protection_backend": a.Config.ProtectionBackend, "storage_backend": a.Config.StorageBackend, "billing_mode": "TEST", "billable": false}, nil
+		}
 		signed, err := recoverylab.Run(ctx, recoverylab.Options{
-			Tenant: j.Tenant, RunID: runID, Root: os.Getenv("LIBVIRT_LAB_ROOT"),
+			Tenant: j.Tenant, RunID: runID, RecoveryJobID: j.ID, Root: os.Getenv("LIBVIRT_LAB_ROOT"),
 			FixtureBinary: os.Getenv("LIBVIRT_FIXTURE_BINARY"), Engine: a.Engine,
-			KeepResources: req.KeepResources,
+			KeepResources: req.KeepResources, ProvisionOperationID: provisionOp.OperationID,
 		}, func(stage string, n int64) {
 			progress(n)
 			if e := a.DB.UpdateRecoveryJob(ctx, j.Tenant, j.ID, "RUNNING", stage, "", "", nil, nil); e != nil {

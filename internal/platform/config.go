@@ -24,6 +24,7 @@ type Principal struct {
 }
 type Config struct {
 	DatabaseURL, NATSURL, S3Endpoint, S3Access, S3Secret, S3Bucket, Listen, Brand string
+	StorageBackend, ProtectionBackend                                             string
 	S3TLS                                                                         bool
 	Master, Seed                                                                  []byte
 	Principals                                                                    []Principal
@@ -36,7 +37,10 @@ func env(k, fallback string) string {
 	return fallback
 }
 func LoadConfig() (Config, error) {
-	c := Config{DatabaseURL: os.Getenv("DATABASE_URL"), NATSURL: os.Getenv("NATS_URL"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Access: os.Getenv("S3_ACCESS_KEY"), S3Secret: os.Getenv("S3_SECRET_KEY"), S3Bucket: env("S3_BUCKET", "draas-backups"), S3TLS: env("S3_TLS", "true") == "true", Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Brand: env("BRAND_NAME", "DraaS")}
+	c := Config{DatabaseURL: os.Getenv("DATABASE_URL"), NATSURL: os.Getenv("NATS_URL"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Access: os.Getenv("S3_ACCESS_KEY"), S3Secret: os.Getenv("S3_SECRET_KEY"), S3Bucket: env("S3_BUCKET", "draas-backups"), StorageBackend: env("DRAAS_STORAGE_BACKEND", "s3"), ProtectionBackend: env("DRAAS_PROTECTION_BACKEND", env("DRAAS_STORAGE_BACKEND", "s3")), S3TLS: env("S3_TLS", "true") == "true", Listen: env("LISTEN_ADDR", "127.0.0.1:8080"), Brand: env("BRAND_NAME", "DraaS")}
+	if os.Getenv("DRAAS_PROTECTION_BACKEND") != "" && os.Getenv("DRAAS_STORAGE_BACKEND") == "" {
+		c.StorageBackend = c.ProtectionBackend
+	}
 	var err error
 	c.Master, err = hex.DecodeString(os.Getenv("MASTER_KEY"))
 	if err != nil || len(c.Master) != 32 {
@@ -46,8 +50,26 @@ func LoadConfig() (Config, error) {
 	if err != nil || len(c.Seed) != 32 {
 		return c, errors.New("SIGNING_SEED must contain 32 hex-encoded bytes")
 	}
-	if c.DatabaseURL == "" || c.NATSURL == "" || c.S3Endpoint == "" || c.S3Access == "" || c.S3Secret == "" {
-		return c, errors.New("database, NATS and S3 configuration required")
+	if c.DatabaseURL == "" || c.NATSURL == "" {
+		return c, errors.New("database and NATS configuration required")
+	}
+	if c.StorageBackend != "s3" && c.StorageBackend != "zfs" && c.StorageBackend != "kubernetes-zfs" && c.StorageBackend != "velero" {
+		return c, errors.New("DRAAS_STORAGE_BACKEND must be s3, zfs, kubernetes-zfs or velero")
+	}
+	if c.ProtectionBackend != "s3" && c.ProtectionBackend != "zfs" && c.ProtectionBackend != "kubernetes-zfs" && c.ProtectionBackend != "velero" {
+		return c, errors.New("DRAAS_PROTECTION_BACKEND must be s3, zfs, kubernetes-zfs or velero")
+	}
+	if c.StorageBackend == "s3" && (c.S3Endpoint == "" || c.S3Access == "" || c.S3Secret == "") {
+		return c, errors.New("S3 configuration required when DRAAS_STORAGE_BACKEND=s3")
+	}
+	if c.ProtectionBackend == "zfs" && os.Getenv("DRAAS_ZFS_POOL") == "" {
+		return c, errors.New("DRAAS_ZFS_POOL required when DRAAS_PROTECTION_BACKEND=zfs")
+	}
+	if c.ProtectionBackend == "kubernetes-zfs" && os.Getenv("DRAAS_K8S_ZFS_STORAGE_CLASS") == "" {
+		return c, errors.New("DRAAS_K8S_ZFS_STORAGE_CLASS required when DRAAS_PROTECTION_BACKEND=kubernetes-zfs")
+	}
+	if c.ProtectionBackend == "velero" && os.Getenv("DRAAS_VELERO_NAMESPACE") == "" {
+		return c, errors.New("DRAAS_VELERO_NAMESPACE required when DRAAS_PROTECTION_BACKEND=velero")
 	}
 	if err = json.Unmarshal([]byte(os.Getenv("AUTH_PRINCIPALS")), &c.Principals); err != nil || len(c.Principals) == 0 {
 		return c, errors.New("AUTH_PRINCIPALS JSON required")
@@ -87,14 +109,17 @@ func Open(ctx context.Context, c Config) (*App, error) {
 			return nil, err
 		}
 	}
-	st, err := storage.New(c.S3Endpoint, c.S3Access, c.S3Secret, c.S3Bucket, c.S3TLS)
-	if err != nil {
-		db.Pool.Close()
-		return nil, err
-	}
-	if err = st.Ensure(ctx); err != nil {
-		db.Pool.Close()
-		return nil, err
+	var st *storage.S3
+	if c.StorageBackend == "s3" {
+		st, err = storage.New(c.S3Endpoint, c.S3Access, c.S3Secret, c.S3Bucket, c.S3TLS)
+		if err != nil {
+			db.Pool.Close()
+			return nil, err
+		}
+		if err = st.Ensure(ctx); err != nil {
+			db.Pool.Close()
+			return nil, err
+		}
 	}
 	nc, err := nats.Connect(c.NATSURL, nats.Name("draas"), nats.Timeout(5*time.Second), nats.MaxReconnects(-1))
 	if err != nil {

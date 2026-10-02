@@ -14,12 +14,14 @@ import (
 )
 
 type Options struct {
-	Tenant        string
-	RunID         string
-	Root          string
-	FixtureBinary string
-	Engine        *backup.Engine
-	KeepResources bool
+	Tenant               string
+	RunID                string
+	RecoveryJobID        string
+	Root                 string
+	FixtureBinary        string
+	Engine               *backup.Engine
+	KeepResources        bool
+	ProvisionOperationID string
 }
 
 type SignedReport struct {
@@ -243,8 +245,15 @@ func Run(ctx context.Context, opt Options, progress func(stage string, bytes int
 	report["restore"] = stats
 	report["disk_sha256"] = hash
 	step("BOOT_RECOVERY")
-	provisionOp := catalog.RecoveryOperationID(opt.RunID, catalog.RecoveryStageResourceProvision, "PROVISION_VM", "recovery")
-	recovered, err := p.CreateWithOperation(ctx, opt.Tenant, opt.RunID, "recovery", target, "", true, provisionOp, incremental.ID, "TEST")
+	provisionOp := opt.ProvisionOperationID
+	if provisionOp == "" {
+		provisionOp = catalog.RecoveryOperationID(opt.RunID, catalog.RecoveryStageResourceProvision, "PROVISION_VM", "recovery")
+	}
+	recoveryJobID := opt.RecoveryJobID
+	if recoveryJobID == "" {
+		recoveryJobID = opt.RunID
+	}
+	recovered, err := p.CreateWithOperation(ctx, opt.Tenant, opt.RunID, recoveryJobID, "recovery", target, "", true, provisionOp, incremental.ID, "TEST")
 	if err != nil {
 		cleanupOnError(err)
 		return SignedReport{}, err

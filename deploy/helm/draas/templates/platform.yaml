@@ -1,4 +1,11 @@
 {{- range list "api" "worker" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: draas-{{ . }}
+  namespace: {{ $.Values.namespace }}
+automountServiceAccountToken: {{ if and (eq . "worker") (or (eq $.Values.protection.backend "kubernetes-zfs") (eq $.Values.protection.backend "velero")) }}true{{ else }}false{{ end }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,7 +19,8 @@ spec:
     metadata:
       labels: {app: draas-{{ . }}}
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: draas-{{ . }}
+      automountServiceAccountToken: {{ if and (eq . "worker") (or (eq $.Values.protection.backend "kubernetes-zfs") (eq $.Values.protection.backend "velero")) }}true{{ else }}false{{ end }}
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
@@ -29,6 +37,15 @@ spec:
           env:
             - {name: LISTEN_ADDR, value: "0.0.0.0:8080"}
             - {name: BRAND_NAME, value: {{ $.Values.brand | quote }}}
+            - {name: DRAAS_STORAGE_BACKEND, value: {{ $.Values.storageBackend | quote }}}
+            - {name: DRAAS_PROTECTION_BACKEND, value: {{ $.Values.protection.backend | quote }}}
+            {{- if eq $.Values.protection.backend "kubernetes-zfs" }}
+            - {name: DRAAS_K8S_RECOVERY_NAMESPACE, value: {{ $.Values.k8sZfs.recoveryNamespace | quote }}}
+            - {name: DRAAS_K8S_ZFS_STORAGE_CLASS, value: {{ $.Values.k8sZfs.storageClass | quote }}}
+            - {name: DRAAS_K8S_VALIDATOR_IMAGE, value: {{ $.Values.k8sZfs.validatorImage | quote }}}
+            {{- else if eq $.Values.protection.backend "velero" }}
+            - {name: DRAAS_VELERO_NAMESPACE, value: {{ $.Values.velero.namespace | quote }}}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

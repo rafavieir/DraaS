@@ -553,6 +553,13 @@ FROM provider_resources WHERE tenant_id=$1 AND operation_id=$2 ORDER BY last_see
 	return r, err
 }
 
+func (d *DB) ProviderResourceByJobType(ctx context.Context, tenant, recoveryJobID, resourceType string) (ProviderResource, error) {
+	var r ProviderResource
+	err := d.Pool.QueryRow(ctx, `SELECT id,tenant_id,recovery_job_id,activation_session_id,provider,resource_type,provider_resource_id,operation_id,status,handle,cleanup_policy,created_at,last_seen_at
+FROM provider_resources WHERE tenant_id=$1 AND recovery_job_id=$2 AND resource_type=$3 ORDER BY last_seen_at DESC LIMIT 1`, tenant, recoveryJobID, resourceType).Scan(&r.ID, &r.Tenant, &r.RecoveryJobID, &r.ActivationSessionID, &r.Provider, &r.ResourceType, &r.ProviderResourceID, &r.OperationID, &r.Status, &r.Handle, &r.CleanupPolicy, &r.CreatedAt, &r.LastSeenAt)
+	return r, err
+}
+
 func (d *DB) AppendRecoveryTimeline(ctx context.Context, tenant, recoveryJobID, eventType, stage, operationID string, detail any) error {
 	b, _ := json.Marshal(detail)
 	_, err := d.Pool.Exec(ctx, `INSERT INTO recovery_timeline(tenant_id,id,recovery_job_id,event_type,stage,operation_id,detail)
@@ -630,6 +637,18 @@ WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4`, te
 }
 
 func (d *DB) AdvanceRecoveryStage(ctx context.Context, tenant, recoveryJobID, owner string, generation int64, expectedVersion int64, stage, status string) (bool, error) {
+	var current string
+	err := d.Pool.QueryRow(ctx, `SELECT stage FROM recovery_jobs
+WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4 AND version=$5`, tenant, recoveryJobID, owner, generation, expectedVersion).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !CanTransition(current, stage) {
+		return false, fmt.Errorf("invalid recovery stage transition %s -> %s", current, stage)
+	}
 	tag, err := d.Pool.Exec(ctx, `UPDATE recovery_jobs
 SET stage=$6, status=$7, version=version+1, updated_at=now()
 WHERE tenant_id=$1 AND job_id=$2 AND lease_owner=$3 AND lease_generation=$4 AND version=$5`, tenant, recoveryJobID, owner, generation, expectedVersion, stage, status)
@@ -692,10 +711,34 @@ func (d *DB) Finish(ctx context.Context, j Job, status string, result any, jobEr
 	}
 	return tx.Commit(ctx)
 }
+func (d *DB) RecoveryPointManifest(ctx context.Context, tenant, id string) (json.RawMessage, int64, string, error) {
+	var manifest json.RawMessage
+	var size int64
+	var status string
+	err := d.Pool.QueryRow(ctx, "SELECT manifest,size,status FROM recovery_points WHERE tenant_id=$1 AND id=$2", tenant, id).Scan(&manifest, &size, &status)
+	return manifest, size, status, err
+}
 func (d *DB) SavePoint(ctx context.Context, m backup.Manifest, s backup.Stats) error {
 	b, _ := json.Marshal(m)
 	stats, _ := json.Marshal(s)
 	_, err := d.Pool.Exec(ctx, "INSERT INTO recovery_points(tenant_id,id,workload_id,size,manifest,stats,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(tenant_id,id) DO NOTHING", m.Tenant, m.ID, m.Workload, m.Size, b, stats, m.CreatedAt)
+	return err
+}
+func (d *DB) SaveBlockRecoveryPoint(ctx context.Context, tenant, id, workloadID string, size int64, manifest any, stats any, status string) error {
+	b, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	sb, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		status = "VERIFIED"
+	}
+	_, err = d.Pool.Exec(ctx, `INSERT INTO recovery_points(tenant_id,id,workload_id,size,manifest,stats,status,verified_at,created_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $7='VERIFIED' THEN now() ELSE NULL END,now())
+ON CONFLICT(tenant_id,id) DO UPDATE SET workload_id=EXCLUDED.workload_id,size=EXCLUDED.size,manifest=EXCLUDED.manifest,stats=EXCLUDED.stats,status=EXCLUDED.status,verified_at=EXCLUDED.verified_at`, tenant, id, workloadID, size, b, sb, status)
 	return err
 }
 func (d *DB) SetPointStatus(ctx context.Context, tenant, id, status string) error {

@@ -35,16 +35,17 @@ type Provider struct {
 	FixtureBinary string
 }
 type VM struct {
-	ID        string    `json:"id"`
-	Tenant    string    `json:"tenant"`
-	RunID     string    `json:"run_id"`
-	Disk      string    `json:"disk"`
-	HTTPPort  int       `json:"http_port"`
-	SSHPort   int       `json:"ssh_port"`
-	Isolated  bool      `json:"isolated"`
-	CreatedAt time.Time `json:"created_at"`
-	Lifetime  string    `json:"lifetime"`
-	Operation string    `json:"operation_id,omitempty"`
+	ID            string    `json:"id"`
+	Tenant        string    `json:"tenant"`
+	RunID         string    `json:"run_id"`
+	RecoveryJobID string    `json:"recovery_job_id,omitempty"`
+	Disk          string    `json:"disk"`
+	HTTPPort      int       `json:"http_port"`
+	SSHPort       int       `json:"ssh_port"`
+	Isolated      bool      `json:"isolated"`
+	CreatedAt     time.Time `json:"created_at"`
+	Lifetime      string    `json:"lifetime"`
+	Operation     string    `json:"operation_id,omitempty"`
 }
 type Guest struct {
 	Healthy     bool     `json:"healthy"`
@@ -79,14 +80,16 @@ func (p *Provider) ValidateCredentials(ctx context.Context) error {
 
 func handleFromVM(v VM) contracts.ResourceHandle {
 	return contracts.ResourceHandle{ProviderResourceID: v.ID, ProviderCluster: "libvirt-qemu-system", Metadata: map[string]string{
-		"tenant":       v.Tenant,
-		"run_id":       v.RunID,
-		"disk":         v.Disk,
-		"http_port":    strconv.Itoa(v.HTTPPort),
-		"ssh_port":     strconv.Itoa(v.SSHPort),
-		"isolated":     strconv.FormatBool(v.Isolated),
-		"lifetime":     v.Lifetime,
-		"operation_id": v.Operation,
+		"managed_by":      "draas",
+		"tenant":          v.Tenant,
+		"run_id":          v.RunID,
+		"recovery_job_id": v.RecoveryJobID,
+		"disk":            v.Disk,
+		"http_port":       strconv.Itoa(v.HTTPPort),
+		"ssh_port":        strconv.Itoa(v.SSHPort),
+		"isolated":        strconv.FormatBool(v.Isolated),
+		"lifetime":        v.Lifetime,
+		"operation_id":    v.Operation,
 	}}
 }
 
@@ -102,15 +105,16 @@ func vmFromHandle(h contracts.ResourceHandle) (VM, error) {
 	sshPort, _ := strconv.Atoi(m["ssh_port"])
 	isolated, _ := strconv.ParseBool(m["isolated"])
 	return VM{
-		ID:        h.ProviderResourceID,
-		Tenant:    m["tenant"],
-		RunID:     m["run_id"],
-		Disk:      m["disk"],
-		HTTPPort:  httpPort,
-		SSHPort:   sshPort,
-		Isolated:  isolated,
-		Lifetime:  m["lifetime"],
-		Operation: m["operation_id"],
+		ID:            h.ProviderResourceID,
+		Tenant:        m["tenant"],
+		RunID:         m["run_id"],
+		RecoveryJobID: m["recovery_job_id"],
+		Disk:          m["disk"],
+		HTTPPort:      httpPort,
+		SSHPort:       sshPort,
+		Isolated:      isolated,
+		Lifetime:      m["lifetime"],
+		Operation:     m["operation_id"],
 	}, nil
 }
 
@@ -237,6 +241,15 @@ func (v V2Provider) OpenConsole(ctx context.Context, h contracts.ResourceHandle)
 	}
 	return contracts.ConsoleSession{Protocol: "ssh", URL: fmt.Sprintf("ssh://root@127.0.0.1:%d", vm.SSHPort)}, nil
 }
+
+func (v V2Provider) Command(ctx context.Context, h contracts.ResourceHandle, cmd string) (string, error) {
+	vm, err := vmFromHandle(h)
+	if err != nil {
+		return "", err
+	}
+	return v.Provider.Command(ctx, vm, cmd)
+}
+
 func (v V2Provider) Delete(ctx context.Context, operationID string, h contracts.ResourceHandle) error {
 	vm, err := vmFromHandle(h)
 	if err != nil {
@@ -509,11 +522,20 @@ runcmd:
 	vm, err := p.Create(ctx, tenant, run, "source", disk, seed, false)
 	return vm, checksum, err
 }
-func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed string, isolated bool) (VM, error) {
-	return p.CreateWithOperation(ctx, tenant, run, suffix, disk, seed, isolated, "", "", "TEST")
+func zvolDiskPath(disk string) bool {
+	clean := filepath.Clean(disk)
+	return strings.HasPrefix(clean, "/dev/zvol/") && !strings.Contains(clean, "..") && !strings.ContainsAny(clean, " \t\n\r;&|`$<>")
+}
+func ownedDiskPath(disk, dir string) bool {
+	clean := filepath.Clean(disk)
+	return strings.HasPrefix(clean, dir+string(os.PathSeparator)) || zvolDiskPath(clean)
 }
 
-func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, suffix, disk, seed string, isolated bool, operationID, recoveryPointID, environmentType string) (VM, error) {
+func (p *Provider) Create(ctx context.Context, tenant, run, suffix, disk, seed string, isolated bool) (VM, error) {
+	return p.CreateWithOperation(ctx, tenant, run, run, suffix, disk, seed, isolated, "", "", "TEST")
+}
+
+func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, recoveryJobID, suffix, disk, seed string, isolated bool, operationID, recoveryPointID, environmentType string) (VM, error) {
 	if !backup.ValidID(tenant) || !backup.ValidID(suffix) {
 		return VM{}, errors.New("invalid resource identity")
 	}
@@ -522,7 +544,7 @@ func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, suffix,
 		return VM{}, err
 	}
 	disk = filepath.Clean(disk)
-	if !strings.HasPrefix(disk, dir+string(os.PathSeparator)) {
+	if !ownedDiskPath(disk, dir) {
 		return VM{}, errors.New("disk outside owned run")
 	}
 	id := "draas-lab-" + run + "-" + suffix
@@ -551,7 +573,7 @@ func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, suffix,
 	if environmentType == "" {
 		environmentType = "TEST"
 	}
-	v := VM{ID: id, Tenant: tenant, RunID: run, Disk: disk, HTTPPort: hp, SSHPort: sp, Isolated: isolated, CreatedAt: time.Now().UTC(), Lifetime: "TEMPORARY_TEST", Operation: operationID}
+	v := VM{ID: id, Tenant: tenant, RunID: run, RecoveryJobID: recoveryJobID, Disk: disk, HTTPPort: hp, SSHPort: sp, Isolated: isolated, CreatedAt: time.Now().UTC(), Lifetime: "TEMPORARY_TEST", Operation: operationID}
 	restrict := "off"
 	if isolated {
 		restrict = "on"
@@ -560,7 +582,7 @@ func (p *Provider) CreateWithOperation(ctx context.Context, tenant, run, suffix,
 	if seed != "" {
 		cd = fmt.Sprintf("<disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='%s'/><target dev='sda' bus='sata'/><readonly/></disk>", xmlEscape(seed))
 	}
-	body := fmt.Sprintf(`<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'><name>%s</name><metadata><draas:resource xmlns:draas='https://draas.local/draas' managed_by='draas' tenant_id='%s' recovery_job_id='%s' operation_id='%s' recovery_point_id='%s' environment_type='%s' lifetime='TEMPORARY_TEST'/></metadata><memory unit='MiB'>512</memory><vcpu>1</vcpu><os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os><features><acpi/><apic/></features><cpu mode='host-passthrough'/><on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none'/><source file='%s'/><target dev='vda' bus='virtio'/></disk>%s<serial type='file'><source path='%s'/><target port='0'/></serial><console type='file'><source path='%s'/><target type='serial' port='0'/></console><memballoon model='none'/></devices><qemu:commandline><qemu:arg value='-netdev'/><qemu:arg value='user,id=labnet,restrict=%s,hostfwd=tcp:127.0.0.1:%d-:8080,hostfwd=tcp:127.0.0.1:%d-:22'/><qemu:arg value='-device'/><qemu:arg value='virtio-net-pci,netdev=labnet,mac=52:54:00:44:52:01,addr=0x10'/></qemu:commandline></domain>`, id, tenant, run, operationID, recoveryPointID, environmentType, xmlEscape(disk), cd, xmlEscape(filepath.Join(dir, suffix+"-serial.log")), xmlEscape(filepath.Join(dir, suffix+"-serial.log")), restrict, hp, sp)
+	body := fmt.Sprintf(`<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'><name>%s</name><metadata><draas:resource xmlns:draas='https://draas.local/draas' managed_by='draas' tenant_id='%s' recovery_job_id='%s' run_id='%s' operation_id='%s' recovery_point_id='%s' environment_type='%s' lifetime='TEMPORARY_TEST' disk='%s' http_port='%d' ssh_port='%d' isolated='%t'/></metadata><memory unit='MiB'>512</memory><vcpu>1</vcpu><os><type arch='x86_64' machine='q35'>hvm</type><boot dev='hd'/></os><features><acpi/><apic/></features><cpu mode='host-passthrough'/><on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><devices><emulator>/usr/bin/qemu-system-x86_64</emulator><disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none'/><source file='%s'/><target dev='vda' bus='virtio'/></disk>%s<serial type='file'><source path='%s'/><target port='0'/></serial><console type='file'><source path='%s'/><target type='serial' port='0'/></console><memballoon model='none'/></devices><qemu:commandline><qemu:arg value='-netdev'/><qemu:arg value='user,id=labnet,restrict=%s,hostfwd=tcp:127.0.0.1:%d-:8080,hostfwd=tcp:127.0.0.1:%d-:22'/><qemu:arg value='-device'/><qemu:arg value='virtio-net-pci,netdev=labnet,mac=52:54:00:44:52:01,addr=0x10'/></qemu:commandline></domain>`, id, tenant, recoveryJobID, run, operationID, recoveryPointID, environmentType, xmlEscape(disk), hp, sp, isolated, xmlEscape(disk), cd, xmlEscape(filepath.Join(dir, suffix+"-serial.log")), xmlEscape(filepath.Join(dir, suffix+"-serial.log")), restrict, hp, sp)
 	xmlPath := filepath.Join(dir, suffix+".xml")
 	if err = os.WriteFile(xmlPath, []byte(body), 0600); err != nil {
 		return v, err
@@ -595,16 +617,25 @@ func (p *Provider) VMFromDomain(ctx context.Context, id string) (VM, error) {
 				Managed     string `xml:"managed_by,attr"`
 				Tenant      string `xml:"tenant_id,attr"`
 				Run         string `xml:"recovery_job_id,attr"`
+				RunID       string `xml:"run_id,attr"`
 				Operation   string `xml:"operation_id,attr"`
 				Lifetime    string `xml:"lifetime,attr"`
 				Environment string `xml:"environment_type,attr"`
+				Disk        string `xml:"disk,attr"`
+				HTTPPort    int    `xml:"http_port,attr"`
+				SSHPort     int    `xml:"ssh_port,attr"`
+				Isolated    bool   `xml:"isolated,attr"`
 			} `xml:"resource"`
 		} `xml:"metadata"`
 	}
 	if xml.Unmarshal([]byte(definition), &domain) != nil || domain.Metadata.Resource.Managed != "draas" {
 		return VM{}, errors.New("domain is not managed by draas")
 	}
-	vm := VM{ID: id, Tenant: domain.Metadata.Resource.Tenant, RunID: domain.Metadata.Resource.Run, Lifetime: domain.Metadata.Resource.Lifetime, Operation: domain.Metadata.Resource.Operation}
+	runID := domain.Metadata.Resource.RunID
+	if runID == "" {
+		runID = domain.Metadata.Resource.Run
+	}
+	vm := VM{ID: id, Tenant: domain.Metadata.Resource.Tenant, RunID: runID, RecoveryJobID: domain.Metadata.Resource.Run, Disk: domain.Metadata.Resource.Disk, HTTPPort: domain.Metadata.Resource.HTTPPort, SSHPort: domain.Metadata.Resource.SSHPort, Isolated: domain.Metadata.Resource.Isolated, Lifetime: domain.Metadata.Resource.Lifetime, Operation: domain.Metadata.Resource.Operation}
 	if vm.Lifetime == "" {
 		vm.Lifetime = "TEMPORARY_TEST"
 	}
@@ -698,7 +729,7 @@ func (p *Provider) Delete(ctx context.Context, v VM) error {
 		return err
 	}
 	prefix := "draas-lab-" + v.RunID + "-"
-	if !strings.HasPrefix(v.ID, prefix) || filepath.Dir(v.Disk) != dir {
+	if !strings.HasPrefix(v.ID, prefix) || !ownedDiskPath(v.Disk, dir) {
 		return errors.New("resource outside owned run")
 	}
 	suffix := strings.TrimPrefix(v.ID, prefix)
@@ -755,14 +786,18 @@ func (p *Provider) Delete(ctx context.Context, v VM) error {
 			return err
 		}
 	}
-	if filepath.Dir(v.Disk) != dir {
+	if !ownedDiskPath(v.Disk, dir) {
 		return errors.New("disk outside owned run")
 	}
-	if err = os.Remove(v.Disk); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if _, err = os.Stat(v.Disk); !os.IsNotExist(err) {
-		return errors.New("disk deletion not proven")
+	if zvolDiskPath(v.Disk) {
+		// ZFS lifecycle is managed by the block storage reconciler; deleting a VM must not unlink /dev/zvol devices.
+	} else {
+		if err = os.Remove(v.Disk); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if _, err = os.Stat(v.Disk); !os.IsNotExist(err) {
+			return errors.New("disk deletion not proven")
+		}
 	}
 	names, err = virsh(ctx, "list", "--all", "--name")
 	if err != nil {

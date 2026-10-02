@@ -38,3 +38,81 @@ O bootstrap instala `kind` e `Helm` apenas em:
 
 ```text
 .local/tools
+
+---
+
+## Kubernetes Quickstart — Velero + DraaS
+
+Este é o fluxo mínimo validado para laboratório Kubernetes:
+
+1. Validar Velero, CSI, BSL e RBAC:
+
+```bash
+export KUBECONFIG=$PWD/.local/p3d1-k8s-zfs-vm/kubeconfig
+export DRAAS_PROTECTION_BACKEND=velero
+export DRAAS_VELERO_NAMESPACE=velero
+scripts/check-velero.sh artifacts/P3D.1/latest-velero-ready.json
+```
+
+2. Criar um backup Kubernetes pelo DraaS:
+
+```bash
+go run ./cmd/draas-k8s-dr k8s backup create \
+  --namespace draas-e2e-test \
+  --tenant lab-tenant \
+  --asset draas-e2e-test \
+  --state-dir artifacts/P3D.1/e2e-latest/state
+```
+
+3. Listar RecoveryPoints locais gerados pelo DraaS:
+
+```bash
+go run ./cmd/draas-k8s-dr recovery-points list \
+  --state-dir artifacts/P3D.1/e2e-latest/state
+```
+
+4. Restaurar pelo DraaS, sem executar `velero restore create` manualmente:
+
+```bash
+go run ./cmd/draas-k8s-dr restore create \
+  --recovery-point RP_ID \
+  --tenant lab-tenant \
+  --state-dir artifacts/P3D.1/e2e-latest/state
+```
+
+5. Executar o E2E automatizado:
+
+```bash
+DRAAS_ARTIFACT_ROOT=artifacts/P3D.1/e2e-latest \
+  scripts/e2e-velero-draas.sh
+```
+
+O E2E prova:
+
+- Velero `READY`;
+- BackupStorageLocation `Available`;
+- backup real de namespace Kubernetes;
+- RecoveryPoint DraaS automático;
+- destruição do namespace;
+- Restore criado pelo DraaS via Kubernetes API;
+- workload restaurado;
+- HTTP `DRAAS-E2E-OK` validado;
+- segundo teste com PVC/ZFS e conteúdo `DRAAS-PERSISTENT-DATA-OK` validado.
+
+Artefatos principais:
+
+```text
+artifacts/P3D.1/e2e-latest/summary.json
+artifacts/P3D.1/e2e-latest/P3D.1-acceptance.json
+artifacts/P3D.1/latest-velero-ready.json
+```
+
+### Troubleshooting rápido
+
+- `Velero DEGRADED`: rode `scripts/check-velero.sh` e verifique o gate que ficou `WARN` ou `FAIL`.
+- `BSL unavailable`: confirme `kubectl -n velero get backupstoragelocations default -o yaml` e o endpoint S3 configurado.
+- `ImagePullBackOff` no MinIO: use um endpoint S3 compatível externo/lab e configure o BSL; não altere a arquitetura DraaS.
+- `backup Failed` ou `PartiallyFailed`: consulte `kubectl -n velero describe backup BACKUP`.
+- `restore PartiallyFailed`: consulte warnings/errors em `kubectl -n velero describe restore RESTORE`.
+- `PVC Pending`: valide `StorageClass`, `VolumeSnapshotClass` e OpenEBS/ZFS.
+- Snapshot CSI não detectado: a `VolumeSnapshotClass` deve ter `velero.io/csi-volumesnapshot-class=true`.

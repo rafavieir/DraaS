@@ -110,15 +110,34 @@ func (a *App) Handler() http.Handler {
 		if !a.NC.IsConnected() {
 			queue = "UNAVAILABLE"
 		}
-		s3 := "HEALTHY"
-		if ok, err := a.Store.Client.BucketExists(ctx, a.Store.Bucket); err != nil || !ok {
-			s3 = "UNAVAILABLE"
+		storageStatus := "HEALTHY"
+		storageBackend := strings.ToUpper(a.Config.StorageBackend)
+		protectionBackend := strings.ToUpper(a.Config.ProtectionBackend)
+		if a.Config.StorageBackend == "s3" {
+			if a.Store == nil {
+				storageStatus = "UNAVAILABLE"
+			} else if ok, err := a.Store.Client.BucketExists(ctx, a.Store.Bucket); err != nil || !ok {
+				storageStatus = "UNAVAILABLE"
+			}
+		}
+		if a.Config.ProtectionBackend == "zfs" {
+			if os.Getenv("DRAAS_ZFS_POOL") == "" {
+				storageStatus = "UNAVAILABLE"
+			}
+		} else if a.Config.ProtectionBackend == "kubernetes-zfs" {
+			if os.Getenv("DRAAS_K8S_ZFS_STORAGE_CLASS") == "" {
+				storageStatus = "UNAVAILABLE"
+			}
+		} else if a.Config.ProtectionBackend == "velero" {
+			if os.Getenv("DRAAS_VELERO_NAMESPACE") == "" {
+				storageStatus = "UNAVAILABLE"
+			}
 		}
 		provider := "SIMULATOR"
 		if os.Getenv("LIBVIRT_LAB_ROOT") != "" {
 			provider = "LIBVIRT_LAB"
 		}
-		jsonResponse(w, 200, map[string]any{"postgresql": db, "nats": queue, "s3": s3, "recovery_provider": provider, "kubernetes": "DEPLOYMENT_MANAGED", "zsvirt": "NOT_CONFIGURED", "object_lock": "NOT_CONFIGURED"})
+		jsonResponse(w, 200, map[string]any{"postgresql": db, "nats": queue, "storage_backend": storageBackend, "protection_backend": protectionBackend, "storage": storageStatus, "zfs_pool": os.Getenv("DRAAS_ZFS_POOL"), "kubernetes_zfs_storage_class": os.Getenv("DRAAS_K8S_ZFS_STORAGE_CLASS"), "kubernetes_recovery_namespace": env("DRAAS_K8S_RECOVERY_NAMESPACE", "draas-recovery"), "velero_namespace": env("DRAAS_VELERO_NAMESPACE", "velero"), "recovery_provider": provider, "kubernetes": "DEPLOYMENT_MANAGED", "zsvirt": "NOT_CONFIGURED", "object_lock": "NOT_CONFIGURED"})
 	})
 	private.HandleFunc("GET /api/v1/signing-key", func(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, 200, map[string]any{"algorithm": "Ed25519", "public_key": a.Engine.Trusted})
@@ -339,6 +358,17 @@ func (a *App) Handler() http.Handler {
 		a.enqueue(w, r, "vm-power", sessionID, map[string]string{"activation_session_id": session.ID, "vm_id": vmID, "action": action})
 	})
 	private.HandleFunc("GET /api/v1/recovery-points/{id}/manifest", func(w http.ResponseWriter, r *http.Request) {
+		if a.Config.StorageBackend == "zfs" {
+			raw, _, _, err := a.DB.RecoveryPointManifest(r.Context(), principal(r).Tenant, r.PathValue("id"))
+			if err != nil {
+				a.dbError(w, r, err)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			_, _ = w.Write(raw)
+			return
+		}
 		m, err := a.Engine.Load(r.Context(), principal(r).Tenant, r.PathValue("id"))
 		if err != nil {
 			if errors.Is(err, backup.ErrNotFound) {

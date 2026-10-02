@@ -4,7 +4,17 @@ namespace: draas-system
 tenant: lab-tenant
 brand: DraaS
 secretName: draas-config
+# storageBackend is kept for legacy object/block storage compatibility.
+storageBackend: s3
+# protection.backend selects the DR protection engine. Use velero for Kubernetes DR.
+protection:
+  backend: s3
+velero:
+  namespace: velero
+k8sZfs:
+  recoveryNamespace: draas-recovery
+  storageClass: ""
+  validatorImage: busybox:1.36
 # External S3 is intentionally NOT a workload in this chart.
 labDependencies: true
 observability: true
-

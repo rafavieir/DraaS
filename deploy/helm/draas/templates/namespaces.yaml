@@ -1,4 +1,5 @@
-{{- range list "draas-system" "draas-connectors" "draas-backup" "draas-audit" "draas-recovery" "draas-observability" }}
+﻿{{- $namespaces := list .Values.namespace "draas-connectors" "draas-backup" "draas-audit" .Values.k8sZfs.recoveryNamespace "draas-observability" -}}
+{{- range $namespaces | uniq }}
 apiVersion: v1
 kind: Namespace
 metadata:

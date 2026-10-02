@@ -135,6 +135,9 @@ func rebuild() error {
 	if !allowed {
 		return fmt.Errorf("configured admin principal required for tenant")
 	}
+	if cfg.StorageBackend != "s3" || app.Store == nil {
+		return fmt.Errorf("rebuild scans object manifests and requires DRAAS_STORAGE_BACKEND=s3")
+	}
 	keys, err := app.Store.List(ctx, "manifests/"+tenant+"/")
 	if err != nil {
 		return err

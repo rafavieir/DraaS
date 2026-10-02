@@ -50,3 +50,15 @@ func TestTerminalRecoveryStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestCanTransition(t *testing.T) {
+	if !CanTransition(RecoveryStageResourceProvision, RecoveryStageDiskMaterialize) {
+		t.Fatal("expected RESOURCE_PROVISION -> DISK_MATERIALIZE")
+	}
+	if CanTransition(RecoveryStageResourceProvision, RecoveryStagePowerOn) {
+		t.Fatal("unexpected RESOURCE_PROVISION -> POWER_ON")
+	}
+	if !CanTransition(RecoveryStagePowerOn, RecoveryStageFailed) {
+		t.Fatal("failure transition should be allowed")
+	}
+}

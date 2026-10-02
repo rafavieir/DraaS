@@ -63,3 +63,29 @@ Implemented after the lease/scanner foundation:
 - `draas-lab-check-invariants` checks duplicate VM records and operation/resource consistency in the catalog.
 
 Still missing for P3D.1 PASS: replace the remaining procedural sections of real recovery with one-transition handlers and execute the crash matrix on a real libvirt/KVM environment.
+
+## Automatic UNKNOWN adoption update
+
+Implemented next:
+
+- The provision operation ID used by the worker is now passed into the real lab runner, so the database operation and libvirt XML metadata use the same deterministic ID.
+- Libvirt XML now separates `recovery_job_id` from `run_id`, preserving the catalog job identity while keeping the lab run path stable.
+- `ReconcileRecoveryJob` handles `RESOURCE_PROVISION` adoption for UNKNOWN/CONFIRMED operations: it searches libvirt by `operation_id`, validates tenant/operation metadata, records `provider_resources`, marks the operation CONFIRMED, emits `PROVIDER_RESOURCE_ADOPTED`, and advances to `DISK_MATERIALIZE`.
+- The invariant checker can also report `.partial` disk artifacts when `DRAAS_CHECK_RUN_DIR` is supplied.
+
+Remaining for P3D.1 PASS: implement stage handlers for DISK_MATERIALIZE, DISK_ATTACH, POWER_ON, WAIT_GUEST, VALIDATE_OS and VALIDATE_APPLICATION, then execute the real crash matrix.
+
+## Reconciler stage handlers update
+
+Implemented next:
+
+- `CanTransition(from,to)` now guards the formal recovery stage order.
+- `AdvanceRecoveryStage` reads the current persisted stage under the same lease/version and rejects arbitrary jumps.
+- `DISK_ATTACH` is now handled as an idempotent stage: it refuses `.partial`, verifies the final disk path from the adopted VM handle, confirms `ATTACH_DISK`, and advances.
+- `POWER_ON` observes provider power state first. If already running, it confirms without another start. Otherwise it persists UNKNOWN, starts through provider v2, observes RUNNING, confirms, and advances.
+- `WAIT_GUEST` observes guest state only and advances when healthy.
+- `VALIDATE_OS` runs read-only Linux/boot-id console validation.
+- `VALIDATE_APPLICATION` runs read-only guest health and SQLite integrity/version validation, with before/after app validation failpoints.
+- Make targets `test-worker-takeover-real` and `test-p3d1-crash-matrix` were added. They still depend on the real libvirt harness being executable in the lab environment.
+
+Still missing for P3D.1 PASS: real crash matrix execution, duplicate-delivery scenario, two-worker race scenario, provider-timeout ambiguity, and P3A/P3B/P3C regression reruns in a supported Linux/libvirt runtime.
